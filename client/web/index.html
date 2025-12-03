@@ -3,9 +3,70 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="styles.css">
   <title>STT Pilot</title>
 </head>
+
 <body>
-  
+    <h2>STT Pilot Lydopptak</h2>
+    <button id="micButton">🎤</button>
+    <div id="status">trykk for å starte opptak</div>
+
+<script>
+    let mediaRecorder;
+    let audioChunks = [];
+
+    const micButton = document.getElementById('micButton');
+    const statusDiv = document.getElementById('status');
+    let isRecording = false;
+
+    micButton.addEventListener('click', async () => {
+        if (!isRecording) {
+            // Start recording
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            mediaRecorder.start();
+            statusDiv.textContent = 'Opptak pågår... trykk for å stoppe';
+
+            mediaRecorder.addEventListener('dataavailable', event => {
+                audioChunks.push(event.data);
+            });
+
+            mediaRecorder.addEventListener('stop', () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                audioChunks = [];
+                sendAudioToServer(audioBlob);
+            });
+
+            isRecording = true;
+        } else {
+            // Stop recording
+            mediaRecorder.stop();
+            statusDiv.textContent = 'Behandler lyd...';
+            isRecording = false;
+        }
+    });
+
+    function sendAudioToServeer(audioBlob) {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.wav');
+
+      console.log("FormData klar til sending:", formData);
+
+      fetch("http://localhost:5000/upload_audio", {
+          method: 'POST',
+          body: formData
+      })
+      .then(response => response.json())
+      .then(data => {
+          console.log('Server response:', data);
+          statusDiv.textContent = 'Transkripsjon mottatt. Behandler ... ';
+    })
+      .catch(error => {
+          console.error('Feil ved sending av lyd:', error);
+          statusDiv.textContent = 'Feil ved sending av lyd.';
+      });
+    }
+</script>
 </body>
 </html>
