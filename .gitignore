@@ -1,4 +1,3 @@
-# Foxtrot-Delta-STT
 # Python bytecode
 __pycache__/
 *.pyc
@@ -43,4 +42,3 @@ build/
 .env
 *.env
 .env.*
-
