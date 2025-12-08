@@ -1,72 +1,81 @@
 <!DOCTYPE html>
 <html lang="no">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="styles.css">
-  <title>STT Pilot</title>
-</head>
-
-<body>
-    <h2>STT Pilot Lydopptak</h2>
-    <button id="micButton">🎤</button>
-    <div id="status">trykk for å starte opptak</div>
-
-<script>
-    let mediaRecorder;
-    let audioChunks = [];
-
-    const micButton = document.getElementById('micButton');
-    const statusDiv = document.getElementById('status');
-    let isRecording = false;
-
-    micButton.addEventListener('click', async () => {
-        if (!isRecording) {
-            // Start recording
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
-            mediaRecorder.start();
-            statusDiv.textContent = 'Opptak pågår... trykk for å stoppe';
-
-            mediaRecorder.addEventListener('dataavailable', event => {
-                audioChunks.push(event.data);
-            });
-
-            mediaRecorder.addEventListener('stop', () => {
-                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                audioChunks = [];
-                sendAudioToServer(audioBlob);
-            });
-
-            isRecording = true;
-        } else {
-            // Stop recording
-            mediaRecorder.stop();
-            statusDiv.textContent = 'Behandler lyd...';
-            isRecording = false;
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whisper Webapp</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 20px;
         }
-    });
+        #micButton {
+            width: 100px;
+            height: 100px;
+            background-color: #e63946;
+            color: white;
+            font-size: 24px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+        }
+        #status {
+            margin-top: 20px;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <h1>STT proto 1</h1>
+    <button id="micButton">🎤</button>
+    <div id="status">Trykk på mikrofonen for å starte opptak.</div>
+    <div id="transcription" style="margin-top: 20px;"></div>
 
-    function sendAudioToServeer(audioBlob) {
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'recording.wav');
+    <script>
+        const micButton = document.getElementById("micButton");
+        const statusDiv = document.getElementById("status");
+        const transcriptionDiv = document.getElementById("transcription");
 
-      console.log("FormData klar til sending:", formData);
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
 
-      fetch("http://localhost:5000/upload_audio", {
-          method: 'POST',
-          body: formData
-      })
-      .then(response => response.json())
-      .then(data => {
-          console.log('Server response:', data);
-          statusDiv.textContent = 'Transkripsjon mottatt. Behandler ... ';
-    })
-      .catch(error => {
-          console.error('Feil ved sending av lyd:', error);
-          statusDiv.textContent = 'Feil ved sending av lyd.';
-      });
-    }
-</script>
+        micButton.addEventListener("click", async () => {
+            if (!isRecording) {
+                // Start opptak
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+                mediaRecorder.start();
+
+                isRecording = true;
+                statusDiv.textContent = "Opptak pågår... Trykk for å stoppe.";
+                micButton.style.backgroundColor = "#1d3557";
+            } else {
+                // Stopp opptak
+                mediaRecorder.stop();
+                isRecording = false;
+                statusDiv.textContent = "Behandler lyd...";
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+                    const formData = new FormData();
+                    formData.append("file", audioBlob, "audio.wav");
+
+                    // Send lydfil til backend for transkripsjon
+                    const response = await fetch("http://127.0.0.1:8000/transcribe/", {
+                        method: "POST",
+                        body: formData
+                    });
+
+                    const data = await response.json();
+                    transcriptionDiv.textContent = "Transkripsjon: " + data.text;
+                    micButton.style.backgroundColor = "#e63946";
+                };
+            }
+        });
+    </script>
 </body>
 </html>
