@@ -5,6 +5,21 @@ import whisper
 import os, tempfile, pathlib
 from app.pipeline.summarize import create_meeting_minutes
 
+def format_transcription(text: str) -> str:
+    #  Sett inn linjeskift etter punktum
+    text = text.replace(". ", ".\n")
+
+    #  Sett inn linjeskift etter spørsmål
+    text = text.replace("? ", "?\n")
+
+    #  Sett inn linjeskift etter utrop
+    text = text.replace("! ", "!\n")
+
+    #  Trim ekstra whitespace
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    return "\n".join(lines)
+
 
 app = FastAPI()
 
@@ -39,6 +54,7 @@ async def transcribe(file: UploadFile = File(...)):
         #  Transkribér med Whisper 
         result = model.transcribe(temp_path)
         transcription = result["text"]
+        transcription = format_transcription(transcription)
 
         #  Lag møtereferat med Mistral
         meeting_minutes = create_meeting_minutes(transcription)
