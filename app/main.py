@@ -3,6 +3,8 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import whisper
 import os, tempfile, pathlib
+from app.pipeline.summarize import create_meeting_minutes
+
 
 app = FastAPI()
 
@@ -34,8 +36,20 @@ async def transcribe(file: UploadFile = File(...)):
         temp_path = tmp.name
 
     try:
+        #  Transkribér med Whisper 
         result = model.transcribe(temp_path)
-        return {"text": result["text"]}
+        transcription = result["text"]
+
+        #  Lag møtereferat med Mistral
+        meeting_minutes = create_meeting_minutes(transcription)
+
+        # Returner begge
+        return {
+            "transcription": transcription,
+            "meeting_minutes": meeting_minutes
+        }
+
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
