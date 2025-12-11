@@ -5,53 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>STT proto 2</title>
 
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            text-align: center;
-            padding: 20px;
-            background: #f8f9fa;
-        }
-
-        h1 {
-            margin-bottom: 30px;
-        }
-
-        #micButton {
-            width: 120px;
-            height: 120px;
-            background-color: #e63946;
-            color: white;
-            font-size: 40px;
-            border-radius: 50%;
-            border: none;
-            cursor: pointer;
-        }
-
-        #status {
-            margin-top: 20px;
-            font-size: 18px;
-            font-weight: bold;
-        }
-
-        #output {
-            margin-top: 40px;
-            text-align: left;
-            max-width: 700px;
-            margin-left: auto;
-            margin-right: auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-
-        pre {
-            white-space: pre-wrap;
-            font-size: 15px;
-            line-height: 1.4;
-        }
-    </style>
+    <!-- KOBLING TIL CSS -->
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
@@ -73,7 +28,6 @@
 
         micButton.addEventListener("click", async () => {
             if (!isRecording) {
-                // Start recording
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 mediaRecorder = new MediaRecorder(stream);
 
@@ -86,7 +40,6 @@
                 micButton.style.backgroundColor = "#1d3557";
 
             } else {
-                // Stop recording
                 mediaRecorder.stop();
                 isRecording = false;
                 statusDiv.textContent = "Behandler lyd...";
@@ -103,35 +56,39 @@
 
                     const data = await response.json();
 
+                    // Output content
                     outputDiv.innerHTML = `
-    <div style="
-        background:white;
-        padding:20px;
-        border-radius:10px;
-        box-shadow:0 2px 10px rgba(0,0,0,0.1);
-        margin-bottom:20px;
-        text-align:left;
-    ">
-        <h2 style="margin-top:0;">Transkripsjon</h2>
-        <p style="font-size:16px; line-height:1.6; white-space:pre-wrap;">
-            ${data.transcription}
-        </p>
-    </div>
+                        <div class="box">
+                            <h2>Møtereferat</h2>
+                            <pre>${data.meeting_minutes}</pre>
 
-    <div style="
-        background:white;
-        padding:20px;
-        border-radius:10px;
-        box-shadow:0 2px 10px rgba(0,0,0,0.1);
-        text-align:left;
-    ">
-        <h2 style="margin-top:0;">Møtereferat</h2>
-        <pre style="font-size:16px; line-height:1.6; white-space:pre-wrap;">
-${data.meeting_minutes}
-        </pre>
-    </div>
-`;
+                            <hr>
 
+                            <a href="#" id="toggleTranscription" class="toggle-link">
+                                ▶ Se transkripsjon
+                            </a>
+
+                            <div id="transcriptionBox" class="hidden">
+                                <pre>${data.transcription}</pre>
+                            </div>
+                        </div>
+                    `;
+
+                    // Toggle
+                    const toggle = document.getElementById("toggleTranscription");
+                    const box = document.getElementById("transcriptionBox");
+
+                    toggle.addEventListener("click", (e) => {
+                        e.preventDefault();
+
+                        if (box.classList.contains("hidden")) {
+                            box.classList.remove("hidden");
+                            toggle.textContent = "▼ Skjul transkripsjon";
+                        } else {
+                            box.classList.add("hidden");
+                            toggle.textContent = "▶ Se transkripsjon";
+                        }
+                    });
 
                     statusDiv.textContent = "Ferdig! Trykk mikrofonen for nytt opptak.";
                     micButton.style.backgroundColor = "#e63946";
