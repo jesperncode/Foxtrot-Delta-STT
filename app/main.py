@@ -52,7 +52,7 @@ async def transcribe(file: UploadFile = File(...)):
 
     try:
         #  Transkribér med Whisper 
-        result = model.transcribe(temp_path)
+        result = model.transcribe(temp_path, langugage ="no")
         transcription = result["text"]
         transcription = format_transcription(transcription)
 
