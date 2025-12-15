@@ -5,20 +5,33 @@ import whisper
 import os, tempfile, pathlib
 from app.pipeline.summarize import create_meeting_minutes
 
+def format_transcription(text: str) -> str:
+    #  Sett inn linjeskift etter punktum
+    text = text.replace(". ", ".\n")
+
+    #  Sett inn linjeskift etter spørsmål
+    text = text.replace("? ", "?\n")
+
+    #  Sett inn linjeskift etter utrop
+    text = text.replace("! ", "!\n")
+
+    #  Trim ekstra whitespace
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    return "\n".join(lines)
+
 
 app = FastAPI()
 
 # CORS-oppsett
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-    ],
-    allow_credentials=True,
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|\[::1\]):\d+$",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 model = whisper.load_model("turbo")
 
@@ -36,9 +49,10 @@ async def transcribe(file: UploadFile = File(...)):
         temp_path = tmp.name
 
     try:
-        #  Transkribér med Whisper 
-        result = model.transcribe(temp_path)
+        #  Transkribere med Whisper 
+        result = model.transcribe(temp_path, language ="no")
         transcription = result["text"]
+        transcription = format_transcription(transcription)
 
         #  Lag møtereferat med Mistral
         meeting_minutes = create_meeting_minutes(transcription)
