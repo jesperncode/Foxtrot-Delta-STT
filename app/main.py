@@ -1,29 +1,23 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import whisper
-import os, tempfile, pathlib
+import pathlib
+
 from app.pipeline.summarize import create_meeting_minutes
+from app.utils.meeting import create_meeting
+
 
 def format_transcription(text: str) -> str:
-    #  Sett inn linjeskift etter punktum
     text = text.replace(". ", ".\n")
-
-    #  Sett inn linjeskift etter spørsmål
     text = text.replace("? ", "?\n")
-
-    #  Sett inn linjeskift etter utrop
     text = text.replace("! ", "!\n")
 
-    #  Trim ekstra whitespace
     lines = [line.strip() for line in text.split("\n") if line.strip()]
-
     return "\n".join(lines)
 
 
 app = FastAPI()
 
-# CORS-oppsett
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|\[::1\]):\d+$",
@@ -32,38 +26,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 model = whisper.load_model("turbo")
+
 
 @app.get("/")
 def root():
     return {"status": "ok"}
 
+
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
     content = await file.read()
 
+    meeting_id, meeting_dir = create_meeting()
+
     suffix = pathlib.Path(file.filename).suffix or ".wav"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(content)
-        temp_path = tmp.name
+    audio_path = meeting_dir / f"audio{suffix}"
 
-    try:
-        #  Transkribere med Whisper 
-        result = model.transcribe(temp_path, language ="no")
-        transcription = result["text"]
-        transcription = format_transcription(transcription)
+    with open(audio_path, "wb") as f:
+        f.write(content)
 
-        #  Lag møtereferat med Mistral
-        meeting_minutes = create_meeting_minutes(transcription)
+    # Transkribere
+    result = model.transcribe(str(audio_path), language="no")
+    transcription = format_transcription(result["text"])
 
-        # Returner begge
-        return {
-            "transcription": transcription,
-            "meeting_minutes": meeting_minutes
-        }
+    # Lag referat
+    meeting_minutes = create_meeting_minutes(transcription)
 
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    # Lagre output
+    (meeting_dir / "transcription.txt").write_text(
+        transcription, encoding="utf-8"
+    )
+    (meeting_dir / "summary.txt").write_text(
+        meeting_minutes, encoding="utf-8"
+    )
 
+    return {
+        "transcription": transcription,
+        "meeting_minutes": meeting_minutes
+    }
