@@ -45,9 +45,12 @@
                 statusDiv.textContent = "Behandler lyd...";
 
                 mediaRecorder.onstop = async () => {
-                    const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+                    const mime = mediaRecorder.mimeType || "audio/webm";
+                    const ext = mime.includes("webm") ? "webm" : "wav";
+
+                    const audioBlob = new Blob(audioChunks, { type: mime });
                     const formData = new FormData();
-                    formData.append("file", audioBlob, "audio.wav");
+                    formData.append("file", audioBlob, `audio.${ext}`);
 
                     const response = await fetch("http://127.0.0.1:8000/transcribe", {
                         method: "POST",
