@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STT proto 2</title>
+
+   <link rel="stylesheet" href="css/styles.css">
+
+</head>
+<body>
+
+    <h1>STT proto 1</h1>
+
+    <div style="margin-bottom: 20px;">
+        <input id="fileInput" type="file" accept="audio/*" />
+        <button id="uploadButton">Last opp lydfil</button>
+        <label style="margin-left:10px; font-size: 14px;">
+            <input id="summarizeToggle" type="checkbox" checked /> Lag møtereferat
+        </label>
+    </div>
+
+    <button id="micButton">🎤</button>
+    <div id="status">Trykk på mikrofonen for å starte opptak (eller last opp en lydfil).</div>
+
+    <div id="output"></div>
+
+    <script>
+        const micButton = document.getElementById("micButton");
+        const uploadButton = document.getElementById("uploadButton");
+        const fileInput = document.getElementById("fileInput");
+        const summarizeToggle = document.getElementById("summarizeToggle");
+        const statusDiv = document.getElementById("status");
+        const outputDiv = document.getElementById("output");
+
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        function renderResult(data, clientTimingMs) {
+            const timings = data.timings || {};
+            const clientMs = clientTimingMs != null ? Math.round(clientTimingMs) : null;
+
+            const timingLines = [];
+            if (clientMs != null) timingLines.push(`client_total_ms: ${clientMs}`);
+            Object.keys(timings).forEach(k => timingLines.push(`${k}: ${timings[k]}`));
+
+            outputDiv.innerHTML = `
+                <div class="box">
+                    <h2>Resultat</h2>
+                    <div style="margin-bottom: 12px;">
+                        <strong>Timing</strong>
+                        <pre>${timingLines.join("\n")}</pre>
+                    </div>
+
+                    <hr>
+
+                    <h3>Møtereferat</h3>
+                    <pre>${data.meeting_minutes || ""}</pre>
+
+                    <hr>
+
+                    <a href="#" id="toggleTranscription" class="toggle-link">▶ Se transkripsjon</a>
+                    <div id="transcriptionBox" class="hidden">
+                        <pre>${data.transcription || ""}</pre>
+                    </div>
+                </div>
+            `;
+
+            const toggle = document.getElementById("toggleTranscription");
+            const box = document.getElementById("transcriptionBox");
+            toggle.addEventListener("click", (e) => {
+                e.preventDefault();
+                if (box.classList.contains("hidden")) {
+                    box.classList.remove("hidden");
+                    toggle.textContent = "▼ Skjul transkripsjon";
+                } else {
+                    box.classList.add("hidden");
+                    toggle.textContent = "▶ Se transkripsjon";
+                }
+            });
+        }
+
+        async function sendAudio(blob, filename) {
+            const summarize = summarizeToggle.checked ? "true" : "false";
+            const url = `http://127.0.0.1:8000/transcribe?summarize=${summarize}`;
+
+            const formData = new FormData();
+            formData.append("file", blob, filename);
+
+            const t0 = performance.now();
+            const response = await fetch(url, { method: "POST", body: formData });
+            const data = await response.json();
+            const t1 = performance.now();
+
+            renderResult(data, t1 - t0);
+        }
+
+        uploadButton.addEventListener("click", async () => {
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) {
+                statusDiv.textContent = "Velg en lydfil først.";
+                return;
+            }
+
+            statusDiv.textContent = "Behandler lydfil...";
+            try {
+                await sendAudio(file, file.name || "audio.mp3");
+                statusDiv.textContent = "Ferdig!";
+            } catch (err) {
+                console.error(err);
+                statusDiv.textContent = "Feil: Klarte ikke å sende/lese lydfil.";
+            }
+        });
+
+        micButton.addEventListener("click", async () => {
+            if (!isRecording) {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+
+                audioChunks = [];
+                mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+                mediaRecorder.start();
+
+                isRecording = true;
+                statusDiv.textContent = "Opptak pågår... Trykk for å stoppe.";
+                micButton.style.backgroundColor = "#1d3557";
+            } else {
+                mediaRecorder.stop();
+                isRecording = false;
+                statusDiv.textContent = "Behandler lyd...";
+
+                mediaRecorder.onstop = async () => {
+                    const mime = mediaRecorder.mimeType || "audio/webm";
+                    const ext = mime.includes("webm") ? "webm" : "wav";
+                    const audioBlob = new Blob(audioChunks, { type: mime });
+
+                    try {
+                        await sendAudio(audioBlob, `audio.${ext}`);
+                        statusDiv.textContent = "Ferdig! Trykk mikrofonen for nytt opptak.";
+                    } catch (err) {
+                        console.error(err);
+                        statusDiv.textContent = "Feil: Klarte ikke å sende/lese lyd.";
+                    } finally {
+                        micButton.style.backgroundColor = "#e63946";
+                    }
+                };
+            }
+        });
+    </script>
+
+</body>
+</html>
