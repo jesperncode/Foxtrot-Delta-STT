@@ -1,10 +1,18 @@
 import requests
+from requests.exceptions import RequestException
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_URL = "http://localhost:11434/api/chat"
+
+SYSTEM = (
+    "Du er en profesjonell møteassistent. "
+    "Du skal alltid svare på norsk bokmål. "
+    "Lag et strukturert møtereferat basert på transkripsjonen. "
+    "Ikke skriv på engelsk."
+)
 
 def create_meeting_minutes(transcription: str) -> str:
-    prompt = f"""
-Du er en profesjonell møteassistent. Lag et strukturert møtereferat basert på transkripsjonen nedenfor. Den SKAL være på norsk bokmål
+    user_prompt = f"""
+Lag et strukturert møtereferat basert på transkripsjonen nedenfor. Den SKAL være på norsk bokmål.
 
 FORMAT:
 
@@ -39,17 +47,32 @@ Risikoer / Avklaringer
 TRANSKRIPSJON:
 {transcription}
 -------------------------------------------
-
-Lag referatet profesjonelt og strukturert.
-"""
+""".strip()
 
     payload = {
         "model": "mistral",
-        "prompt": prompt,
-        "stream": False
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "options": {"temperature": 0.0},
     }
 
-    response = requests.post(OLLAMA_URL, json=payload)
-    data = response.json()
+    try:
+        r = requests.post(OLLAMA_URL, json=payload, timeout=300)
+        r.raise_for_status()
+        data = r.json()
 
-    return data["response"]
+        content = (data.get("message", {}) or {}).get("content", "")
+        content = content.strip()
+
+        if not content:
+            if "error" in data:
+                return f"Ollama-feil: {data['error']}"
+            return f"Ollama ga tomt svar. Raw: {data}"
+
+        return content
+
+    except RequestException as e:
+        return "(Kunne ikke lage møtereferat: Ollama svarte ikke.)\n\n" + str(e)

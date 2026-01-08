@@ -1,104 +1,147 @@
 <!DOCTYPE html>
 <html lang="no">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>STT proto 2</title>
-
-   <link rel="stylesheet" href="css/styles.css">
-
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>STT proto 2</title>
+  <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
 
-    <h1>STT proto 1</h1>
+  <h1>STT proto 1</h1>
 
-    <button id="micButton">🎤</button>
-    <div id="status">Trykk på mikrofonen for å starte opptak.</div>
+  <button id="micButton">🎤</button>
+  <div id="status">Trykk på mikrofonen for å starte opptak.</div>
 
-    <div id="output"></div>
+  <!-- NYTT: Filopplasting (uten å fjerne noe annet) -->
+  <div class="upload">
+    <input type="file" id="fileInput" accept="audio/*,.webm,.wav,.mp3,.m4a,.ogg">
+    <button id="uploadBtn">Last opp og transkriber</button>
+  </div>
 
-    <script>
-        const micButton = document.getElementById("micButton");
-        const statusDiv = document.getElementById("status");
-        const outputDiv = document.getElementById("output");
+  <div id="output"></div>
 
-        let mediaRecorder;
-        let audioChunks = [];
-        let isRecording = false;
+  <script>
+    const micButton = document.getElementById("micButton");
+    const statusDiv = document.getElementById("status");
+    const outputDiv = document.getElementById("output");
 
-        micButton.addEventListener("click", async () => {
-            if (!isRecording) {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                mediaRecorder = new MediaRecorder(stream);
+    // Filopplasting
+    const fileInput = document.getElementById("fileInput");
+    const uploadBtn = document.getElementById("uploadBtn");
 
-                audioChunks = [];
-                mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
-                mediaRecorder.start();
+    let mediaRecorder;
+    let audioChunks = [];
+    let isRecording = false;
 
-                isRecording = true;
-                statusDiv.textContent = "Opptak pågår... Trykk for å stoppe.";
-                micButton.style.backgroundColor = "#1d3557";
+    async function sendToBackend(formData) {
+      statusDiv.textContent = "Behandler lyd...";
 
-            } else {
-                mediaRecorder.stop();
-                isRecording = false;
-                statusDiv.textContent = "Behandler lyd...";
+      const response = await fetch("http://127.0.0.1:8000/transcribe", {
+        method: "POST",
+        body: formData
+      });
 
-                mediaRecorder.onstop = async () => {
-                    const mime = mediaRecorder.mimeType || "audio/webm";
-                    const ext = mime.includes("webm") ? "webm" : "wav";
+      if (!response.ok) {
+        const txt = await response.text();
+        statusDiv.textContent = `Feil fra backend (${response.status})`;
+        outputDiv.innerHTML = `<div class="box"><pre>${escapeHtml(txt)}</pre></div>`;
+        return;
+      }
 
-                    const audioBlob = new Blob(audioChunks, { type: mime });
-                    const formData = new FormData();
-                    formData.append("file", audioBlob, `audio.${ext}`);
+      const data = await response.json();
 
-                    const response = await fetch("http://127.0.0.1:8000/transcribe", {
-                        method: "POST",
-                        body: formData
-                    });
+      outputDiv.innerHTML = `
+        <div class="box">
+          <h2>Møtereferat</h2>
+          <pre>${escapeHtml(data.meeting_minutes || "")}</pre>
 
-                    const data = await response.json();
+          <hr>
 
-                    // Output content
-                    outputDiv.innerHTML = `
-                        <div class="box">
-                            <h2>Møtereferat</h2>
-                            <pre>${data.meeting_minutes}</pre>
+          <a href="#" id="toggleTranscription" class="toggle-link">
+            ▶ Se transkripsjon
+          </a>
 
-                            <hr>
+          <div id="transcriptionBox" class="hidden">
+            <pre>${escapeHtml(data.transcription || "")}</pre>
+          </div>
+        </div>
+      `;
 
-                            <a href="#" id="toggleTranscription" class="toggle-link">
-                                ▶ Se transkripsjon
-                            </a>
+      const toggle = document.getElementById("toggleTranscription");
+      const box = document.getElementById("transcriptionBox");
 
-                            <div id="transcriptionBox" class="hidden">
-                                <pre>${data.transcription}</pre>
-                            </div>
-                        </div>
-                    `;
+      toggle.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (box.classList.contains("hidden")) {
+          box.classList.remove("hidden");
+          toggle.textContent = "▼ Skjul transkripsjon";
+        } else {
+          box.classList.add("hidden");
+          toggle.textContent = "▶ Se transkripsjon";
+        }
+      });
 
-                    // Toggle
-                    const toggle = document.getElementById("toggleTranscription");
-                    const box = document.getElementById("transcriptionBox");
+      statusDiv.textContent = "Ferdig! Trykk mikrofonen for nytt opptak eller last opp ny fil.";
+    }
 
-                    toggle.addEventListener("click", (e) => {
-                        e.preventDefault();
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
 
-                        if (box.classList.contains("hidden")) {
-                            box.classList.remove("hidden");
-                            toggle.textContent = "▼ Skjul transkripsjon";
-                        } else {
-                            box.classList.add("hidden");
-                            toggle.textContent = "▶ Se transkripsjon";
-                        }
-                    });
+    // MIC-opptak (som før, men bruker sendToBackend)
+    micButton.addEventListener("click", async () => {
+      if (!isRecording) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
 
-                    statusDiv.textContent = "Ferdig! Trykk mikrofonen for nytt opptak.";
-                    micButton.style.backgroundColor = "#e63946";
-                };
-            }
-        });
-    </script>
+        audioChunks = [];
+        mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+        mediaRecorder.start();
+
+        isRecording = true;
+        statusDiv.textContent = "Opptak pågår... Trykk for å stoppe.";
+        micButton.style.backgroundColor = "#1d3557";
+
+      } else {
+        mediaRecorder.stop();
+        isRecording = false;
+        statusDiv.textContent = "Behandler lyd...";
+
+        mediaRecorder.onstop = async () => {
+          const mime = mediaRecorder.mimeType || "audio/webm";
+          const ext = mime.includes("webm") ? "webm" : "wav";
+
+          const audioBlob = new Blob(audioChunks, { type: mime });
+          const formData = new FormData();
+          formData.append("file", audioBlob, `audio.${ext}`);
+
+          await sendToBackend(formData);
+
+          micButton.style.backgroundColor = "#e63946";
+        };
+      }
+    });
+
+    // Filopplasting
+    uploadBtn.addEventListener("click", async () => {
+      const file = fileInput.files?.[0];
+      if (!file) {
+        statusDiv.textContent = "Velg en lydfil først.";
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", file, file.name);
+
+      await sendToBackend(formData);
+    });
+  </script>
 
 </body>
 </html>
