@@ -1,147 +1,270 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="no">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>STT proto 2</title>
-  <link rel="stylesheet" href="css/styles.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>STT proto</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 20px;
+      background: #f8f9fa;
+    }
+
+    h1 {
+      margin-bottom: 30px;
+    }
+
+    #micButton {
+      width: 120px;
+      height: 120px;
+      background-color: #e63946;
+      color: white;
+      font-size: 40px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+    }
+
+    #status {
+      margin-top: 20px;
+      font-size: 18px;
+      font-weight: bold;
+    }
+
+    #output {
+      margin-top: 40px;
+      text-align: left;
+      max-width: 700px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .box {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      font-size: 15px;
+      line-height: 1.5;
+      margin: 0;
+    }
+
+    .toggle-link {
+      color: #1d3557;
+      font-weight: bold;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    /* Litt layout for opplasting under mic */
+    .upload-row {
+      margin-top: 22px;
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .upload-row button {
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+
+    #timings {
+      margin-top: 10px;
+      font-size: 14px;
+      font-weight: normal;
+    }
+  </style>
 </head>
+
 <body>
+  <h1>STT proto</h1>
 
-  <h1>STT proto 1</h1>
+  <!-- Mic midt på skjermen -->
+  <button id="micButton" title="Start/stopp opptak">🎤</button>
 
-  <button id="micButton">🎤</button>
-  <div id="status">Trykk på mikrofonen for å starte opptak.</div>
+  <div id="status"></div>
+  <div id="timings"></div>
 
-  <!-- NYTT: Filopplasting (uten å fjerne noe annet) -->
-  <div class="upload">
-    <input type="file" id="fileInput" accept="audio/*,.webm,.wav,.mp3,.m4a,.ogg">
+  <!-- Filopplasting under -->
+  <div class="upload-row">
+    <input id="fileInput" type="file" accept="audio/*" />
     <button id="uploadBtn">Last opp og transkriber</button>
   </div>
 
-  <div id="output"></div>
+  <!-- Output -->
+  <div id="output">
+    <div class="box">
+      <h2>Møtereferat</h2>
+      <pre id="minutes">Ingen data ennå.</pre>
+    </div>
+
+    <div class="box">
+      <h2>Transkripsjon</h2>
+      <a id="toggleTranscription" class="toggle-link">▼ Vis transkripsjon</a>
+      <div id="transcriptionWrap" class="hidden" style="margin-top: 12px;">
+        <pre id="transcription">Ingen data ennå.</pre>
+      </div>
+    </div>
+  </div>
 
   <script>
-    const micButton = document.getElementById("micButton");
-    const statusDiv = document.getElementById("status");
-    const outputDiv = document.getElementById("output");
+    const API_URL = "http://localhost:8000/transcribe";
 
-    // Filopplasting
+    const micButton = document.getElementById("micButton");
+    const statusEl = document.getElementById("status");
+    const timingsEl = document.getElementById("timings");
+
     const fileInput = document.getElementById("fileInput");
     const uploadBtn = document.getElementById("uploadBtn");
 
-    let mediaRecorder;
-    let audioChunks = [];
+    const minutesEl = document.getElementById("minutes");
+    const transcriptionEl = document.getElementById("transcription");
+
+    const toggleLink = document.getElementById("toggleTranscription");
+    const transcriptionWrap = document.getElementById("transcriptionWrap");
+
+    let mediaRecorder = null;
+    let chunks = [];
     let isRecording = false;
 
-    async function sendToBackend(formData) {
-      statusDiv.textContent = "Behandler lyd...";
+    function setStatus(text) {
+      statusEl.textContent = text || "";
+    }
 
-      const response = await fetch("http://127.0.0.1:8000/transcribe", {
-        method: "POST",
-        body: formData
-      });
+    function clearTimings() {
+      timingsEl.innerHTML = "";
+    }
 
-      if (!response.ok) {
-        const txt = await response.text();
-        statusDiv.textContent = `Feil fra backend (${response.status})`;
-        outputDiv.innerHTML = `<div class="box"><pre>${escapeHtml(txt)}</pre></div>`;
+    function renderTimings(t) {
+      if (!t) {
+        clearTimings();
         return;
       }
-
-      const data = await response.json();
-
-      outputDiv.innerHTML = `
-        <div class="box">
-          <h2>Møtereferat</h2>
-          <pre>${escapeHtml(data.meeting_minutes || "")}</pre>
-
-          <hr>
-
-          <a href="#" id="toggleTranscription" class="toggle-link">
-            ▶ Se transkripsjon
-          </a>
-
-          <div id="transcriptionBox" class="hidden">
-            <pre>${escapeHtml(data.transcription || "")}</pre>
-          </div>
-        </div>
+      const tr = t.transcription ?? "?";
+      const su = t.summarization ?? "?";
+      const to = t.total ?? "?";
+      timingsEl.innerHTML = `
+        Tidsbruk — Transkribering: <b>${tr}</b>s • Oppsummering: <b>${su}</b>s • Total: <b>${to}</b>s
       `;
+    }
 
-      const toggle = document.getElementById("toggleTranscription");
-      const box = document.getElementById("transcriptionBox");
+    function setWorkingState() {
+      minutesEl.textContent = "Jobber...";
+      transcriptionEl.textContent = "Jobber...";
+      clearTimings();
+    }
 
-      toggle.addEventListener("click", (e) => {
-        e.preventDefault();
-        if (box.classList.contains("hidden")) {
-          box.classList.remove("hidden");
-          toggle.textContent = "▼ Skjul transkripsjon";
-        } else {
-          box.classList.add("hidden");
-          toggle.textContent = "▶ Se transkripsjon";
-        }
+    async function sendAudio(fileOrBlob, filename) {
+      setStatus("Sender til transkribering...");
+      setWorkingState();
+
+      const fd = new FormData();
+      fd.append("file", fileOrBlob, filename);
+
+      const res = await fetch(API_URL, {
+        method: "POST",
+        body: fd
       });
 
-      statusDiv.textContent = "Ferdig! Trykk mikrofonen for nytt opptak eller last opp ny fil.";
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+
+      const data = await res.json();
+
+      minutesEl.textContent = data.meeting_minutes || "";
+      transcriptionEl.textContent = data.transcription || "";
+      renderTimings(data.timings_seconds);
+
+      setStatus("Ferdig!");
     }
 
-    function escapeHtml(str) {
-      return String(str)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-    }
-
-    // MIC-opptak (som før, men bruker sendToBackend)
-    micButton.addEventListener("click", async () => {
-      if (!isRecording) {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-
-        audioChunks = [];
-        mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
-        mediaRecorder.start();
-
-        isRecording = true;
-        statusDiv.textContent = "Opptak pågår... Trykk for å stoppe.";
-        micButton.style.backgroundColor = "#1d3557";
-
+    // Toggle transkripsjon
+    toggleLink.addEventListener("click", () => {
+      const hidden = transcriptionWrap.classList.contains("hidden");
+      if (hidden) {
+        transcriptionWrap.classList.remove("hidden");
+        toggleLink.textContent = "▲ Skjul transkripsjon";
       } else {
-        mediaRecorder.stop();
-        isRecording = false;
-        statusDiv.textContent = "Behandler lyd...";
-
-        mediaRecorder.onstop = async () => {
-          const mime = mediaRecorder.mimeType || "audio/webm";
-          const ext = mime.includes("webm") ? "webm" : "wav";
-
-          const audioBlob = new Blob(audioChunks, { type: mime });
-          const formData = new FormData();
-          formData.append("file", audioBlob, `audio.${ext}`);
-
-          await sendToBackend(formData);
-
-          micButton.style.backgroundColor = "#e63946";
-        };
+        transcriptionWrap.classList.add("hidden");
+        toggleLink.textContent = "▼ Vis transkripsjon";
       }
     });
 
-    // Filopplasting
+    // Mic: start/stop + auto-upload ved stopp
+    micButton.addEventListener("click", async () => {
+      try {
+        if (!isRecording) {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          chunks = [];
+
+          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) chunks.push(e.data);
+          };
+
+          mediaRecorder.onstop = async () => {
+            // frigjør mic
+            stream.getTracks().forEach(t => t.stop());
+
+            const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
+
+            try {
+              await sendAudio(blob, "audio.webm");
+            } catch (err) {
+              setStatus("Feil: " + (err?.message || err));
+              minutesEl.textContent = "Feil.";
+              transcriptionEl.textContent = "Feil.";
+              clearTimings();
+            }
+          };
+
+          mediaRecorder.start();
+          isRecording = true;
+          setStatus("Opptak pågår... trykk igjen for å stoppe");
+        } else {
+          mediaRecorder.stop();
+          isRecording = false;
+          setStatus("Ferdig! Laster opp opptaket...");
+        }
+      } catch (err) {
+        setStatus("Feil med mikrofon: " + (err?.message || err));
+      }
+    });
+
+    // Filopplasting-knapp
     uploadBtn.addEventListener("click", async () => {
-      const file = fileInput.files?.[0];
-      if (!file) {
-        statusDiv.textContent = "Velg en lydfil først.";
+      const f = fileInput.files?.[0];
+      if (!f) {
+        setStatus("Velg en lydfil først.");
         return;
       }
 
-      const formData = new FormData();
-      formData.append("file", file, file.name);
-
-      await sendToBackend(formData);
+      try {
+        await sendAudio(f, f.name || "audio.wav");
+      } catch (err) {
+        setStatus("Feil: " + (err?.message || err));
+        minutesEl.textContent = "Feil.";
+        transcriptionEl.textContent = "Feil.";
+        clearTimings();
+      }
     });
   </script>
-
 </body>
 </html>

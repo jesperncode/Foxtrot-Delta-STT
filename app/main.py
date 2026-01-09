@@ -1,7 +1,14 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-import whisper
+from __future__ import annotations
+
+import time
 import pathlib
+
+import whisper
+import torch
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from app.pipeline.summarize import create_meeting_minutes
 from app.utils.meeting import create_meeting
@@ -11,9 +18,14 @@ def format_transcription(text: str) -> str:
     text = text.replace(". ", ".\n")
     text = text.replace("? ", "?\n")
     text = text.replace("! ", "!\n")
-
     lines = [line.strip() for line in text.split("\n") if line.strip()]
     return "\n".join(lines)
+
+
+def pick_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
 
 app = FastAPI()
@@ -26,7 +38,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model = whisper.load_model("turbo")
+device = pick_device()
+model = whisper.load_model("turbo", device=device)
+print("Whisper device:", device)
 
 
 @app.get("/")
@@ -36,8 +50,9 @@ def root():
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
-    content = await file.read()
+    t0_total = time.perf_counter()
 
+    content = await file.read()
     meeting_id, meeting_dir = create_meeting()
 
     suffix = pathlib.Path(file.filename).suffix or ".wav"
@@ -46,22 +61,40 @@ async def transcribe(file: UploadFile = File(...)):
     with open(audio_path, "wb") as f:
         f.write(content)
 
-    # Transkribere
-    result = model.transcribe(str(audio_path), language="no")
-    transcription = format_transcription(result["text"])
+    # Transkribering
+    t0_asr = time.perf_counter()
+    try:
+        result = await run_in_threadpool(
+            model.transcribe,
+            str(audio_path),
+            language="no",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Whisper transcribe feilet: {e}")
 
-    # Lag referat
-    meeting_minutes = create_meeting_minutes(transcription)
+    t_asr = time.perf_counter() - t0_asr
+    transcription = format_transcription(result.get("text", ""))
 
-    # Lagre output
-    (meeting_dir / "transcription.txt").write_text(
-        transcription, encoding="utf-8"
-    )
-    (meeting_dir / "summary.txt").write_text(
-        meeting_minutes, encoding="utf-8"
-    )
+    # Oppsummering
+    t0_sum = time.perf_counter()
+    try:
+        meeting_minutes = await run_in_threadpool(create_meeting_minutes, transcription)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ollama/oppsummering feilet: {e}")
+
+    t_sum = time.perf_counter() - t0_sum
+    t_total = time.perf_counter() - t0_total
+
+    (meeting_dir / "transcription.txt").write_text(transcription, encoding="utf-8")
+    (meeting_dir / "summary.txt").write_text(meeting_minutes, encoding="utf-8")
 
     return {
+        "meeting_id": meeting_id,
         "transcription": transcription,
-        "meeting_minutes": meeting_minutes
+        "meeting_minutes": meeting_minutes,
+        "timings_seconds": {
+            "transcription": round(t_asr, 3),
+            "summarization": round(t_sum, 3),
+            "total": round(t_total, 3),
+        },
     }
