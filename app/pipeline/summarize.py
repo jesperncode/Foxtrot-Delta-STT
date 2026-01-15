@@ -6,43 +6,34 @@ from typing import List
 
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-OLLAMA_CHAT_URL = f"{OLLAMA_HOST}/api/chat"
+OLLAMA_GENERATE_URL = f"{OLLAMA_HOST}/api/generate"
 
-
-MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+MODEL = os.getenv("OLLAMA_MODEL", "mistral:latest")
 
 SYSTEM_RULES = (
-    "Du er en profesjonell møteassistent. "
-    "Du skal ALLTID svare utelukkende på norsk bokmål. "
-    "Ikke bruk engelsk. Ikke bland språk. "
-    "Du skal kun bruke informasjon som finnes i teksten. Ikke finn på."
+    "KRAV: Svar må være 100% norsk bokmål. Ikke bruk engelsk. "
+    "Bruk kun informasjon som finnes i teksten. Ikke finn på."
 )
 
 
-def _ollama_chat(system: str, user: str, temperature: float = 0.2, timeout_s: int = 300) -> str:
+def _ollama_generate(prompt: str, temperature: float = 0.2, timeout_s: int = 300) -> str:
     payload = {
         "model": MODEL,
+        "prompt": prompt,
         "stream": False,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
         "options": {"temperature": temperature},
     }
 
-    r = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=timeout_s)
-
+    r = requests.post(OLLAMA_GENERATE_URL, json=payload, timeout=timeout_s)
     if r.status_code == 404:
         raise RuntimeError(
-            f"Fikk 404 fra Ollama på {OLLAMA_CHAT_URL}. "
+            f"Fikk 404 fra Ollama på {OLLAMA_GENERATE_URL}. "
             f"Sjekk at OLLAMA_HOST peker riktig."
         )
 
     r.raise_for_status()
     data = r.json()
-
-    msg = data.get("message", {}) or {}
-    return (msg.get("content") or "").strip()
+    return (data.get("response") or "").strip()
 
 
 def _chunk_text_by_lines(text: str, max_chars: int = 12_000) -> List[str]:
@@ -85,11 +76,11 @@ def create_meeting_minutes(transcription: str) -> str:
 
     chunks = _chunk_text_by_lines(transcription, max_chars=12_000)
 
-    # MAP: delnotater
     notes: List[str] = []
     for i, ch in enumerate(chunks, start=1):
-        user = f"""
-Du får DEL {i}/{len(chunks)} av en transkripsjon.
+        prompt = f"""{SYSTEM_RULES}
+
+Du får DEL {i}/{len(chunks)} av en transkripsjon. Transkripsjonen kan inneholde linjer som starter med "Person N:".
 
 Oppgave:
 - Lag KORTE, presise møtenotater fra denne delen.
@@ -111,14 +102,14 @@ Risikoer/Avklaringer:
 TEKST:
 {ch}
 """
-        notes.append(_ollama_chat(SYSTEM_RULES, user, temperature=0.2))
+        notes.append(_ollama_generate(prompt, temperature=0.2))
 
     combined_notes = "\n\n".join(
         f"DELNOTATER {idx}:\n{txt}" for idx, txt in enumerate(notes, start=1)
     )
 
-    # REDUCE: endelig referat
-    user_final = f"""
+    final_prompt = f"""{SYSTEM_RULES}
+
 Lag ett samlet, profesjonelt møtereferat basert på delnotatene.
 
 FORMAT (nøyaktig med disse overskriftene):
@@ -154,8 +145,9 @@ Krav:
 - Ikke finn på ting
 - Hvis noe mangler: skriv "Ikke spesifisert"
 - Ikke referer til "delnotater" i svaret
+- Ikke skriv på engelsk
 
 DELNOTATER:
 {combined_notes}
 """
-    return _ollama_chat(SYSTEM_RULES, user_final, temperature=0.2)
+    return _ollama_generate(final_prompt, temperature=0.2)
