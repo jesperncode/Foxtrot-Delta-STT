@@ -40,7 +40,14 @@ app.add_middleware(
 
 device = pick_device()
 model = whisper.load_model("turbo", device=device)
-print("Whisper device:", device)
+print("Whisper requested device:", device)
+print("Torch CUDA available:", torch.cuda.is_available())
+print("Torch CUDA version:", torch.version.cuda)
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+
+print("Model param device:", next(model.parameters()).device)
+
 
 
 @app.get("/")

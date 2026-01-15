@@ -9,7 +9,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_CHAT_URL = f"{OLLAMA_HOST}/api/chat"
 
 
-MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+MODEL = os.getenv("OLLAMA_MODEL", "llama3:8b")
 
 SYSTEM_RULES = (
     "Du er en profesjonell møteassistent. "
