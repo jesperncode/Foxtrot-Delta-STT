@@ -60,7 +60,12 @@ async def transcribe(file: UploadFile = File(...)):
     t0_total = time.perf_counter()
 
     content = await file.read()
-    meeting_id, meeting_dir = create_meeting()
+
+    try:
+        meeting_id, meeting_dir = create_meeting()
+    except RuntimeError as e:
+    # USB mangler / policy matcher ikke
+        raise HTTPException(status_code=503, detail=str(e))
 
     suffix = pathlib.Path(file.filename).suffix or ".wav"
     audio_path = meeting_dir / f"audio{suffix}"
