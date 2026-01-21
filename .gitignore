@@ -1,44 +1,113 @@
-# Python bytecode
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+############################
+# Python
+############################
 
-# Virtuelle miljøer
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments (VIKTIG – dette er 10k filer hos deg)
 venv/
 .venv/
+.venv_*/
+*_venv/
+diarizer/.venv_diar/
+.venv_diar/
 
-# Mac og editor-ting
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+############################
+# OS / Editor
+############################
+
 .DS_Store
+Thumbs.db
+
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Modellfiler (STT/LLM) - store og sensitive
-models/
-models/whisper/
-models/mistral/
+############################
+# Miljøvariabler / secrets
+############################
 
-# Lydfiler (brukerdata)
+.env
+.env.*
+*.env
+
+############################
+# Logger / temp
+############################
+
+logs/
+*.log
+
+tmp/
+temp/
+*.tmp
+*.bak
+
+############################
+# Audio / brukerdata
+############################
+
 audio/
 recordings/
+uploads/
+
 *.wav
 *.mp3
 *.m4a
 *.flac
+*.ogg
+*.webm
 
-# Logger og tmp
-logs/
-*.log
-tmp/
-temp/
-*.tmp
+############################
+# ML / AI / modeller (VIKTIG)
+############################
 
-# Node (hvis du senere har web-build)
+# Lokale modeller
+models/
+models/whisper/
+models/mistral/
+
+# HuggingFace / Torch cache
+.hf_cache/
+hf_home/
+.cache/huggingface/
+.cache/torch/
+.cache/whisper/
+
+############################
+# Node / frontend build
+############################
+
 node_modules/
 dist/
 build/
+.out/
+.next/
 
-# Miljøvariabler / hemmeligheter
-.env
-*.env
-.env.*
+############################
+# Database / runtime
+############################
+
+*.sqlite
+*.db
+*.duckdb
+
+############################
+# Misc
+############################
+
+*.zip
+*.tar
+*.tar.gz
+*.rar

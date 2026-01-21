@@ -4,49 +4,108 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>STT proto</title>
-
+  <link rel="stylesheet" href="css/styles.css" />
 </head>
 
 <body>
-  <h1>STT proto</h1>
+  <div class="page">
+    <header class="header">
+      <div class="brand">STT proto</div>
+      <div class="small" id="meetingMeta">Møte-ID: <span id="meetingId">—</span></div>
+    </header>
 
-  <!-- Mic midt på skjermen -->
-  <button id="micButton" title="Start/stopp opptak">🎤</button>
+    <main class="main">
+      <div class="mic-area">
+        <button id="micButton" class="micButton" title="Start/stopp opptak" aria-label="Start/stopp opptak">🎤</button>
 
-  <div id="status"></div>
-  <div id="timings"></div>
+        <div class="hint">
+          Trykk på mikrofonen for å starte opptak.<br />
+          Trykk igjen for å stoppe og transkribere.
+        </div>
 
-  <!-- Filopplasting under -->
-  <div class="upload-row">
-    <input id="fileInput" type="file" accept="audio/*" />
-    <button id="uploadBtn">Last opp og transkriber</button>
-  </div>
-
-  <!-- Output -->
-  <div id="output">
-    <div class="box">
-      <h2>Møtereferat</h2>
-      <pre id="minutes">Ingen data ennå.</pre>
-    </div>
-
-    <div class="box">
-      <h2>Transkripsjon</h2>
-      <a id="toggleTranscription" class="toggle-link">▼ Vis transkripsjon</a>
-      <div id="transcriptionWrap" class="hidden" style="margin-top: 12px;">
-        <pre id="transcription">Ingen data ennå.</pre>
+        <div id="status" class="status"></div>
+        <div id="timings" class="timings"></div>
       </div>
-    </div>
+    </main>
+
+    <section class="secondary">
+      <div class="row">
+        <!-- File picker som matcher design + viser filnavn -->
+        <label class="filePill" id="filePill" title="Velg lydfil">
+          <span class="fileIcon" aria-hidden="true">🎵</span>
+          <span class="fileName" id="fileName">Velg fil</span>
+          <input id="fileInput" type="file" accept="audio/*" hidden />
+        </label>
+
+        <button id="uploadBtn" class="btn primary">Last opp og transkriber</button>
+
+        <button id="editSpeakersBtn" class="btn" disabled>Rediger deltakere</button>
+
+        <button id="saveTextsBtn" class="btn primary" disabled>Lagre endringer</button>
+      </div>
+
+      <!-- Speakers box -->
+      <div id="speakersBox" class="card hidden" style="width: min(1200px, 94vw); margin: 0 auto;">
+        <div class="speakers-header">
+          <div>
+            <div class="speakers-title">Deltakere</div>
+            <div class="small" style="margin-top:4px;">Navn gjelder kun dette møtet. (Du kan alltid endre senere.)</div>
+          </div>
+
+          <div class="speakers-actions">
+            <button id="closeSpeakersBtn" class="btn">Lukk</button>
+            <button id="saveSpeakersBtn" class="btn primary">Lagre navn</button>
+          </div>
+        </div>
+
+        <div id="speakersList" class="speakers-list"></div>
+
+        <div id="speakersHint" class="small" style="margin-top:10px; opacity:.9;"></div>
+      </div>
+    </section>
+
+    <section class="cards" id="output">
+      <!-- Transkripsjon får mer plass -->
+      <div class="card card-wide">
+        <div class="cardTop">
+          <h2>Transkripsjon</h2>
+          <a id="toggleTranscription" class="toggle-link">▼ Vis transkripsjon</a>
+        </div>
+
+        <div id="transcriptionWrap" class="hidden">
+          <textarea id="transcription" placeholder="Ingen data ennå." disabled>Ingen data ennå.</textarea>
+        </div>
+      </div>
+
+      <div class="card card-narrow">
+        <div class="cardTop">
+          <h2>Møtereferat</h2>
+        </div>
+        <textarea id="minutes" placeholder="Ingen data ennå." disabled>Ingen data ennå.</textarea>
+      </div>
+    </section>
   </div>
 
   <script>
-    const API_URL = "http://localhost:8000/transcribe";
+    // ---- API ----
+    const API_BASE = "http://localhost:8000";
+    const TRANSCRIBE_URL = API_BASE + "/transcribe";
+    const MEETING_SPEAKERS_URL = (meetingId) => API_BASE + `/meetings/${encodeURIComponent(meetingId)}/speakers`;
+    const MEETING_TEXTS_URL    = (meetingId) => API_BASE + `/meetings/${encodeURIComponent(meetingId)}/texts`;
 
+    // ---- DOM ----
     const micButton = document.getElementById("micButton");
     const statusEl = document.getElementById("status");
     const timingsEl = document.getElementById("timings");
 
     const fileInput = document.getElementById("fileInput");
+    const fileNameEl = document.getElementById("fileName");
+    const filePill = document.getElementById("filePill");
+
     const uploadBtn = document.getElementById("uploadBtn");
+    const editSpeakersBtn = document.getElementById("editSpeakersBtn");
+
+    const meetingIdEl = document.getElementById("meetingId");
 
     const minutesEl = document.getElementById("minutes");
     const transcriptionEl = document.getElementById("transcription");
@@ -54,47 +113,134 @@
     const toggleLink = document.getElementById("toggleTranscription");
     const transcriptionWrap = document.getElementById("transcriptionWrap");
 
+    const speakersBox = document.getElementById("speakersBox");
+    const speakersList = document.getElementById("speakersList");
+    const speakersHint = document.getElementById("speakersHint");
+
+    const saveSpeakersBtn = document.getElementById("saveSpeakersBtn");
+    const closeSpeakersBtn = document.getElementById("closeSpeakersBtn");
+
+    const saveTextsBtn = document.getElementById("saveTextsBtn");
+
     let mediaRecorder = null;
     let chunks = [];
     let isRecording = false;
 
-    function setStatus(text) {
-      statusEl.textContent = text || "";
-    }
+    // state
+    let currentMeetingId = null;
+    let currentSpeakers = []; // [{speaker_id,label,name}]
+    let dirty = false;
 
-    function clearTimings() {
-      timingsEl.innerHTML = "";
-    }
+    function setStatus(text) { statusEl.textContent = text || ""; }
+    function clearTimings() { timingsEl.innerHTML = ""; }
 
     function renderTimings(t) {
-      if (!t) {
-        clearTimings();
-        return;
-      }
+      if (!t) { clearTimings(); return; }
       const tr = t.transcription ?? "?";
       const su = t.summarization ?? "?";
       const to = t.total ?? "?";
-      timingsEl.innerHTML = `
-        Tidsbruk — Transkribering: <b>${tr}</b>s • Oppsummering: <b>${su}</b>s • Total: <b>${to}</b>s
-      `;
+      timingsEl.innerHTML = `Tidsbruk — Transkribering: <b>${tr}</b>s • Oppsummering: <b>${su}</b>s • Total: <b>${to}</b>s`;
     }
 
     function setWorkingState() {
-      minutesEl.textContent = "Jobber...";
-      transcriptionEl.textContent = "Jobber...";
+      minutesEl.value = "Jobber...";
+      transcriptionEl.value = "Jobber...";
+      minutesEl.disabled = true;
+      transcriptionEl.disabled = true;
+
+      saveTextsBtn.disabled = true;
+      editSpeakersBtn.disabled = true;
+
+      speakersBox.classList.add("hidden");
+      speakersList.innerHTML = "";
+      speakersHint.textContent = "";
       clearTimings();
+      dirty = false;
     }
 
-    async function sendAudio(fileOrBlob, filename) {
-      setStatus("Sender til transkribering...");
-      setWorkingState();
+    function enableEditors() {
+      minutesEl.disabled = false;
+      transcriptionEl.disabled = false;
+      saveTextsBtn.disabled = false;
+      editSpeakersBtn.disabled = !currentMeetingId;
+    }
 
-      const fd = new FormData();
-      fd.append("file", fileOrBlob, filename);
+    function markDirty() {
+      dirty = true;
+      saveTextsBtn.classList.remove("btn-saved");
+      saveTextsBtn.textContent = "Lagre endringer";
+    }
 
-      const res = await fetch(API_URL, {
-        method: "POST",
-        body: fd
+    minutesEl.addEventListener("input", markDirty);
+    transcriptionEl.addEventListener("input", markDirty);
+
+    // ---- File UI: vis filnavn ----
+    fileInput.addEventListener("change", () => {
+      const f = fileInput.files?.[0];
+      if (!f) {
+        fileNameEl.textContent = "Velg fil";
+        filePill.classList.remove("hasFile");
+        return;
+      }
+      fileNameEl.textContent = f.name;
+      filePill.classList.add("hasFile");
+    });
+
+    // ---- Speakers UI ----
+    function renderSpeakers(speakers) {
+      currentSpeakers = Array.isArray(speakers) ? speakers : [];
+      speakersList.innerHTML = "";
+
+      if (!currentSpeakers.length) {
+        speakersHint.textContent = "Ingen deltakere funnet ennå.";
+        return;
+      }
+
+      speakersHint.textContent = "";
+
+      for (const sp of currentSpeakers) {
+        const row = document.createElement("div");
+        row.className = "speaker-row";
+
+        const left = document.createElement("div");
+        left.className = "speaker-label";
+        left.textContent = sp.label || sp.speaker_id || "Person";
+
+        const input = document.createElement("input");
+        input.className = "speaker-input";
+        input.type = "text";
+        input.value = sp.name || "";
+        input.placeholder = "Skriv navn…";
+        input.dataset.speakerId = sp.speaker_id;
+
+        row.appendChild(left);
+        row.appendChild(input);
+        speakersList.appendChild(row);
+      }
+    }
+
+    function collectSpeakerMappingFromUI() {
+      const mapping = {};
+      const inputs = speakersList.querySelectorAll("input[data-speaker-id]");
+      inputs.forEach(inp => {
+        const id = inp.dataset.speakerId;
+        const name = (inp.value || "").trim();
+        if (id) mapping[id] = name; // tom string er også lov
+      });
+      return mapping;
+    }
+
+    async function saveSpeakerNames() {
+      // ✅ BUGFIX: bruk riktig variabel
+      if (!currentMeetingId) return;
+
+      const mapping = collectSpeakerMappingFromUI();
+
+      setStatus("Lagrer navn…");
+      const res = await fetch(MEETING_SPEAKERS_URL(currentMeetingId), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mapping),
       });
 
       if (!res.ok) {
@@ -104,10 +250,118 @@
 
       const data = await res.json();
 
-      minutesEl.textContent = data.meeting_minutes || "";
-      transcriptionEl.textContent = data.transcription || "";
+      // ✅ Viktig: hold speakers lokalt så "Rediger deltakere" alltid fungerer
+      if (data && Array.isArray(data.speakers)) {
+        currentSpeakers = data.speakers;
+      } else {
+        // fallback hvis backend ikke returnerer speakers:
+        currentSpeakers = currentSpeakers.map(sp => ({
+          ...sp,
+          name: mapping[sp.speaker_id] ?? sp.name ?? ""
+        }));
+      }
+
+      renderSpeakers(currentSpeakers);
+
+      // backend kan returnere oppdatert transcription
+      if (typeof data?.transcription === "string") {
+        transcriptionEl.value = data.transcription;
+      }
+
+      markDirty();
+      setStatus("Navn lagret.");
+    }
+
+    saveSpeakersBtn.addEventListener("click", async () => {
+      try {
+        await saveSpeakerNames();
+      } catch (err) {
+        setStatus("Feil: " + (err?.message || err));
+      }
+    });
+
+    closeSpeakersBtn.addEventListener("click", () => {
+      speakersBox.classList.add("hidden");
+    });
+
+    // ✅ “Rediger deltakere” skal bare vise boksen igjen
+    editSpeakersBtn.addEventListener("click", () => {
+      if (!currentMeetingId) return;
+      speakersBox.classList.remove("hidden");
+      renderSpeakers(currentSpeakers);
+      const first = speakersList.querySelector("input");
+      if (first) first.focus();
+    });
+
+    // ---- Save texts ----
+    async function saveTexts() {
+      if (!currentMeetingId) return;
+
+      setStatus("Lagrer tekst…");
+      const payload = {
+        meeting_minutes: minutesEl.value || "",
+        transcription: transcriptionEl.value || ""
+      };
+
+      const res = await fetch(MEETING_TEXTS_URL(currentMeetingId), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+
+      saveTextsBtn.classList.add("btn-saved");
+      saveTextsBtn.textContent = "Lagret ✓";
+      dirty = false;
+      setStatus("Endringer lagret.");
+    }
+
+    saveTextsBtn.addEventListener("click", async () => {
+      try {
+        await saveTexts();
+      } catch (err) {
+        setStatus("Feil: " + (err?.message || err));
+      }
+    });
+
+    // ---- Transcribe ----
+    async function sendAudio(fileOrBlob, filename) {
+      setStatus("Sender til transkribering…");
+      setWorkingState();
+
+      const fd = new FormData();
+      fd.append("file", fileOrBlob, filename);
+
+      const res = await fetch(TRANSCRIBE_URL, { method: "POST", body: fd });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || ("HTTP " + res.status));
+      }
+
+      const data = await res.json();
+
+      currentMeetingId = data.meeting_id || null;
+      meetingIdEl.textContent = currentMeetingId || "—";
+
+      minutesEl.value = data.meeting_minutes || "";
+      transcriptionEl.value = data.transcription || "";
+
       renderTimings(data.timings_seconds || null);
 
+      // speakers (hvis backend sender)
+      if (Array.isArray(data.speakers)) currentSpeakers = data.speakers;
+      else currentSpeakers = [];
+
+      // enable & show transcription by default etter ferdig
+      transcriptionWrap.classList.remove("hidden");
+      toggleLink.textContent = "▲ Skjul transkripsjon";
+
+      enableEditors();
       setStatus("Ferdig!");
     }
 
@@ -136,28 +390,32 @@
           };
 
           mediaRecorder.onstop = async () => {
-            // frigjør mic
             stream.getTracks().forEach(t => t.stop());
-
             const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
 
             try {
               await sendAudio(blob, "audio.webm");
             } catch (err) {
               setStatus("Feil: " + (err?.message || err));
-              minutesEl.textContent = "Feil.";
-              transcriptionEl.textContent = "Feil.";
+              minutesEl.value = "Feil.";
+              transcriptionEl.value = "Feil.";
+              minutesEl.disabled = true;
+              transcriptionEl.disabled = true;
+              saveTextsBtn.disabled = true;
+              editSpeakersBtn.disabled = true;
               clearTimings();
             }
           };
 
           mediaRecorder.start();
           isRecording = true;
-          setStatus("Opptak pågår... trykk igjen for å stoppe");
+          micButton.classList.add("recording");
+          setStatus("Opptak pågår… trykk igjen for å stoppe");
         } else {
           mediaRecorder.stop();
           isRecording = false;
-          setStatus("Ferdig! Laster opp opptaket...");
+          micButton.classList.remove("recording");
+          setStatus("Stopper opptak og laster opp…");
         }
       } catch (err) {
         setStatus("Feil med mikrofon: " + (err?.message || err));
@@ -176,8 +434,12 @@
         await sendAudio(f, f.name || "audio.wav");
       } catch (err) {
         setStatus("Feil: " + (err?.message || err));
-        minutesEl.textContent = "Feil.";
-        transcriptionEl.textContent = "Feil.";
+        minutesEl.value = "Feil.";
+        transcriptionEl.value = "Feil.";
+        minutesEl.disabled = true;
+        transcriptionEl.disabled = true;
+        saveTextsBtn.disabled = true;
+        editSpeakersBtn.disabled = true;
         clearTimings();
       }
     });
