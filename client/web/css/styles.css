@@ -326,3 +326,107 @@ textarea {
   border-color: rgba(39, 209, 127, 0.45);
   box-shadow: 0 0 0 3px rgba(39, 209, 127, 0.12);
 }
+
+/* =========================================================
+   CONSENT POPUP (kun lagt til – påvirker ikke resten av UI)
+   Krever: #consentModal og #pageContent i HTML
+========================================================= */
+
+#consentModal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+/* Glass-look som matcher UI-en */
+#consentModal .modal-content {
+  width: min(920px, 92vw);
+  max-height: min(84vh, 900px);
+  overflow: auto;
+
+  background: rgba(15, 20, 36, 0.72);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 18px;
+  box-shadow: 0 30px 90px rgba(0,0,0,0.55);
+  backdrop-filter: blur(12px);
+
+  padding: 22px 24px;
+  color: var(--text);
+}
+
+/* Tittel: tydelig hvit */
+#consentModal .modal-content h2 {
+  margin: 0 0 14px 0;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.2px;
+  color: var(--text);
+  opacity: 0.98;
+}
+
+/* Brukerveiledning tekst */
+#consentModal .modal-content p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: rgba(232,238,252,0.88);
+}
+
+#consentModal .modal-content strong {
+  color: rgba(232,238,252,0.98);
+}
+
+/* Checkbox */
+#consentModal .checkbox-container {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: rgba(232,238,252,0.9);
+}
+
+#consentModal input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ok);
+}
+
+/* Fortsett-knapp (matcher buttons) */
+#continueBtn {
+  margin-top: 14px;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.10);
+  color: rgba(232,238,252,0.85);
+  font-weight: 900;
+  cursor: not-allowed;
+  opacity: 0.55;
+  transition: transform 0.08s ease, background 0.12s ease, opacity 0.12s ease;
+}
+
+#continueBtn.enabled {
+  background: rgba(39, 209, 127, 0.20);
+  border-color: rgba(39, 209, 127, 0.34);
+  color: var(--text);
+  opacity: 1;
+  cursor: pointer;
+}
+
+#continueBtn.enabled:hover {
+  background: rgba(39, 209, 127, 0.26);
+}
+
+#continueBtn:active { transform: translateY(1px); }
+
+/* Blokker siden bak frem til consent */
+#pageContent {
+  pointer-events: none;
+  filter: blur(2px);
+}
