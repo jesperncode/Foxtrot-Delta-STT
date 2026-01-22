@@ -72,6 +72,18 @@
             <input id="fileInput" type="file" accept="audio/*" hidden />
           </label>
 
+          <!-- NYTT: valg -->
+          <label class="checkbox-container" style="display:flex; gap:8px; align-items:center;">
+            <!-- Default AV så du enkelt kan kjøre KUN transkripsjon -->
+            <input type="checkbox" id="minutesCheckbox">
+            Lag møtereferat
+          </label>
+
+          <label class="checkbox-container" style="display:flex; gap:8px; align-items:center;">
+            <input type="checkbox" id="diarizationCheckbox">
+            Speaker diarization
+          </label>
+
           <button id="uploadBtn" class="btn primary">Last opp og transkriber</button>
 
           <button id="editSpeakersBtn" class="btn" disabled>Rediger deltakere</button>
@@ -116,7 +128,7 @@
           <div class="cardTop">
             <h2>Møtereferat</h2>
           </div>
-          <textarea id="minutes" placeholder="Ingen data ennå." disabled>Ingen data ennå.</textarea>
+          <textarea id="minutes" placeholder="Ikke valgt." disabled>Ikke valgt.</textarea>
         </div>
       </section>
     </div>
@@ -186,6 +198,10 @@
       const closeSpeakersBtn = document.getElementById("closeSpeakersBtn");
       const saveTextsBtn = document.getElementById("saveTextsBtn");
 
+      // NYTT: valg
+      const minutesCheckbox = document.getElementById("minutesCheckbox");
+      const diarizationCheckbox = document.getElementById("diarizationCheckbox");
+
       // ---- State ----
       let currentMeetingId = null;
       let currentSpeakers = []; // [{speaker_id,label,name}]
@@ -210,18 +226,35 @@
           clearTimings();
           return;
         }
+
         const tr = t.transcription ?? "?";
+        const di = t.diarization ?? "?";
         const su = t.summarization ?? "?";
         const to = t.total ?? "?";
+
         timingsEl.innerHTML =
-          `Tidsbruk — Transkribering: <b>${tr}</b>s • Oppsummering: <b>${su}</b>s • Total: <b>${to}</b>s`;
+          `Tidsbruk — Transkribering: <b>${tr}</b>s • Diarization: <b>${di}</b>s • Oppsummering: <b>${su}</b>s • Total: <b>${to}</b>s`;
+      }
+
+      function wantsMinutes() {
+        return !!minutesCheckbox?.checked;
+      }
+
+      function wantsDiarization() {
+        return !!diarizationCheckbox?.checked;
       }
 
       function setWorkingState() {
-        minutesEl.value = "Jobber...";
         transcriptionEl.value = "Jobber...";
-        minutesEl.disabled = true;
         transcriptionEl.disabled = true;
+
+        if (wantsMinutes()) {
+          minutesEl.value = "Jobber...";
+          minutesEl.disabled = true;
+        } else {
+          minutesEl.value = "Ikke valgt.";
+          minutesEl.disabled = true;
+        }
 
         saveTextsBtn.disabled = true;
         editSpeakersBtn.disabled = true;
@@ -234,8 +267,11 @@
       }
 
       function enableEditors() {
-        minutesEl.disabled = false;
         transcriptionEl.disabled = false;
+
+        // møtereferat redigerbar kun hvis valgt / returnert
+        minutesEl.disabled = !wantsMinutes();
+
         saveTextsBtn.disabled = false;
         editSpeakersBtn.disabled = !currentMeetingId;
       }
@@ -324,7 +360,10 @@
 
         const data = await res.json();
 
-        if (typeof data?.meeting_minutes === "string") minutesEl.value = data.meeting_minutes;
+        if (typeof data?.meeting_minutes === "string") {
+          minutesEl.value = data.meeting_minutes || (wantsMinutes() ? "" : "Ikke valgt.");
+        }
+
         if (typeof data?.transcription === "string") transcriptionEl.value = data.transcription;
 
         renderTimings(data.timings_seconds || null);
@@ -407,6 +446,10 @@
         const fd = new FormData();
         fd.append("file", fileOrBlob, filename);
 
+        // NYTT: valg sendes til backend
+        fd.append("include_minutes", wantsMinutes() ? "1" : "0");
+        fd.append("include_diarization", wantsDiarization() ? "1" : "0");
+
         const res = await fetch(TRANSCRIBE_URL, { method: "POST", body: fd });
 
         if (!res.ok) {
@@ -419,8 +462,14 @@
         currentMeetingId = data.meeting_id || null;
         meetingIdEl.textContent = currentMeetingId || "—";
 
-        minutesEl.value = data.meeting_minutes || "";
         transcriptionEl.value = data.transcription || "";
+
+        // minutes kan være tom hvis ikke valgt
+        if (wantsMinutes()) {
+          minutesEl.value = data.meeting_minutes || "";
+        } else {
+          minutesEl.value = "Ikke valgt.";
+        }
 
         renderTimings(data.timings_seconds || null);
 

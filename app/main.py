@@ -12,7 +12,7 @@ import torch
 import whisper
 import soundfile as sf
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
@@ -79,8 +79,6 @@ def get_meeting_dir(meeting_id: str) -> pathlib.Path:
     d = MEETING_DIRS.get(meeting_id)
     if d and d.exists():
         return d
-    # fallback: hvis server er restartet og cache er tom:
-    # prøv å finne ved å søke i noen vanlige steder (uten å gjette for mye)
     raise HTTPException(
         status_code=404,
         detail="Ukjent meeting_id (server restartet eller møtemappe ikke funnet). Kjør /transcribe på nytt.",
@@ -328,7 +326,15 @@ def root():
 
 
 @app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(
+    file: UploadFile = File(...),
+    include_minutes: bool = Form(False),
+    include_diarization: bool = Form(False),
+):
+    """
+    Alltid: Whisper transkripsjon
+    Valgfritt: diarization, møtereferat
+    """
     t0_total = time.perf_counter()
     content = await file.read()
 
@@ -345,7 +351,7 @@ async def transcribe(file: UploadFile = File(...)):
     audio_path = meeting_dir / f"audio{suffix}"
     audio_path.write_bytes(content)
 
-    # Whisper
+    # Whisper (alltid)
     t0_asr = time.perf_counter()
     result = await run_in_threadpool(
         whisper_model.transcribe,
@@ -360,25 +366,32 @@ async def transcribe(file: UploadFile = File(...)):
     podcast_mode = is_podcast_like(first_text)
 
     # Diarization (valgfri)
+    diar_segments: list[dict] = []
     t0_diar = time.perf_counter()
-    diar_segments = await run_in_threadpool(
-        diarize_whole,
-        audio_path,
-        PYANNOTE_MAX_SPEAKERS,
-        podcast_mode,
-    )
+    if include_diarization:
+        diar_segments = await run_in_threadpool(
+            diarize_whole,
+            audio_path,
+            PYANNOTE_MAX_SPEAKERS,
+            podcast_mode,
+        )
     t1_diar = time.perf_counter()
 
     labeled = label_whisper_segments(whisper_segments, diar_segments)
     transcription = render_transcription(labeled)
 
-    # Oppsummering
+    # Møtereferat (valgfritt)
+    minutes = ""
     t0_sum = time.perf_counter()
-    minutes = await run_in_threadpool(create_meeting_minutes, transcription)
+    if include_minutes:
+        minutes = await run_in_threadpool(create_meeting_minutes, transcription)
     t1_sum = time.perf_counter()
 
+    # lagre alltid transkripsjon
     (meeting_dir / "transcription.txt").write_text(transcription, encoding="utf-8")
-    (meeting_dir / "summary.txt").write_text(minutes, encoding="utf-8")
+    # lagre kun summary hvis generert
+    if include_minutes:
+        (meeting_dir / "summary.txt").write_text(minutes, encoding="utf-8")
 
     t1_total = time.perf_counter()
 
@@ -389,12 +402,14 @@ async def transcribe(file: UploadFile = File(...)):
         "meeting_id": meeting_id,
         "podcast_mode": podcast_mode,
         "diarization_enabled": diar_pipeline is not None,
+        "diarization_requested": include_diarization,
+        "minutes_requested": include_minutes,
         "transcription": transcription,
         "meeting_minutes": minutes,
         "timings_seconds": {
             "transcription": round(t1_asr - t0_asr, 3),
-            "diarization": round(t1_diar - t0_diar, 3),
-            "summarization": round(t1_sum - t0_sum, 3),
+            "diarization": round(t1_diar - t0_diar, 3) if include_diarization else 0.0,
+            "summarization": round(t1_sum - t0_sum, 3) if include_minutes else 0.0,
             "total": round(t1_total - t0_total, 3),
         },
         "speakers": speaker_objs,
@@ -403,22 +418,27 @@ async def transcribe(file: UploadFile = File(...)):
 
 @app.put("/meetings/{meeting_id}/speakers")
 async def update_speakers(meeting_id: str, mapping: dict[str, str]):
+    """
+    Oppdaterer speaker-navn i transkripsjon og (hvis finnes) møtereferat.
+    Viktig: møtereferat kan være u-generert (summary.txt finnes ikke).
+    """
     meeting_dir = get_meeting_dir(meeting_id)
 
     t_path = meeting_dir / "transcription.txt"
     s_path = meeting_dir / "summary.txt"
 
-    if not t_path.exists() or not s_path.exists():
-        raise HTTPException(status_code=404, detail="Mangler transkripsjon eller summary for dette møtet")
+    if not t_path.exists():
+        raise HTTPException(status_code=404, detail="Mangler transkripsjon for dette møtet")
 
     transcription = t_path.read_text(encoding="utf-8")
-    minutes = s_path.read_text(encoding="utf-8")
+    minutes = s_path.read_text(encoding="utf-8") if s_path.exists() else ""
 
     transcription2 = replace_speakers(transcription, mapping)
-    minutes2 = replace_speakers(minutes, mapping)
+    minutes2 = replace_speakers(minutes, mapping) if minutes else ""
 
     t_path.write_text(transcription2, encoding="utf-8")
-    s_path.write_text(minutes2, encoding="utf-8")
+    if s_path.exists():
+        s_path.write_text(minutes2, encoding="utf-8")
 
     speakers = [{"speaker_id": k, "label": k, "name": (v or "")} for k, v in mapping.items()]
 
@@ -437,6 +457,9 @@ async def update_texts(meeting_id: str, payload: dict):
     minutes = payload.get("meeting_minutes", "")
 
     (meeting_dir / "transcription.txt").write_text(transcription, encoding="utf-8")
-    (meeting_dir / "summary.txt").write_text(minutes, encoding="utf-8")
+
+    # hvis brukeren lagrer et referat, skriv summary.txt (selv om det ikke fantes før)
+    if isinstance(minutes, str) and minutes.strip():
+        (meeting_dir / "summary.txt").write_text(minutes, encoding="utf-8")
 
     return {"status": "ok"}
