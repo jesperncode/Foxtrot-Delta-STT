@@ -5,6 +5,8 @@ import os
 import pathlib
 import re
 import time
+import textwrap
+import subprocess
 from collections import defaultdict
 from typing import Any
 
@@ -45,6 +47,18 @@ PODCAST_KEEP_TOP_SPEAKERS = int(os.getenv("PODCAST_KEEP_TOP_SPEAKERS", "2"))
 
 MERGE_GAP_S = float(os.getenv("PYANNOTE_MERGE_GAP_S", "0.4"))
 
+# ---- FORMATERINGSKNOTTER ----
+TURN_GAP_S = float(os.getenv("TURN_GAP_S", "1.1"))  # pause > dette -> nytt avsnitt/turn
+PARAGRAPH_MAX_CHARS = int(os.getenv("PARAGRAPH_MAX_CHARS", "750"))
+WRAP_WIDTH = int(os.getenv("WRAP_WIDTH", "110"))  # linjebredde i textarea
+
+# ---- DEBUG ----
+GPU_DEBUG = os.getenv("GPU_DEBUG", "0") == "1"
+
+# ---- SILENCE CHECK (valgfritt men anbefalt) ----
+REJECT_SILENT_AUDIO = os.getenv("REJECT_SILENT_AUDIO", "1") == "1"
+SILENCE_MAX_VOLUME_DB_THRESHOLD = float(os.getenv("SILENCE_MAX_VOLUME_DB_THRESHOLD", "-55.0"))
+
 
 # ==========================================================
 # DEVICE + MODELLER (last én gang)
@@ -52,6 +66,19 @@ MERGE_GAP_S = float(os.getenv("PYANNOTE_MERGE_GAP_S", "0.4"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[INFO] Torch device: {DEVICE}")
 print(f"[INFO] CUDA available: {torch.cuda.is_available()}")
+if DEVICE == "cuda":
+    torch.backends.cudnn.benchmark = True
+
+
+def _gpu_mem(tag: str) -> None:
+    if not GPU_DEBUG:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        alloc = torch.cuda.memory_allocated() // 1024**2
+        resv = torch.cuda.memory_reserved() // 1024**2
+        print(f"[GPU] {tag}: allocated={alloc}MB reserved={resv}MB")
+
 
 whisper_model = whisper.load_model(WHISPER_MODEL, device=DEVICE)
 
@@ -64,13 +91,23 @@ if DIARIZATION_ENABLED and Pipeline is not None:
         else:
             diar_pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL)
             print(f"[INFO] Loaded pyannote pipeline from hub: {PYANNOTE_MODEL}")
+
+        # >>> VIKTIG: flytt pyannote til GPU (ellers ender den ofte på CPU)
+        if diar_pipeline is not None and DEVICE == "cuda":
+            try:
+                diar_pipeline.to(torch.device("cuda"))
+                print("[INFO] Moved pyannote pipeline to CUDA")
+                _gpu_mem("after pyannote.to(cuda)")
+            except Exception as e:
+                print(f"[WARN] Could not move pyannote pipeline to CUDA: {e}")
+
     except Exception as e:
         diar_pipeline = None
         print(f"[WARN] Diarization disabled (pipeline load failed): {e}")
 
 
 # ==========================================================
-# MEETING-ID -> DIR cache (fikser 404)
+# MEETING-ID -> DIR cache
 # ==========================================================
 MEETING_DIRS: dict[str, pathlib.Path] = {}  # fylles i /transcribe
 
@@ -86,11 +123,14 @@ def get_meeting_dir(meeting_id: str) -> pathlib.Path:
 
 
 # ==========================================================
-# HJELPERE (tekst)
+# TEKSTNORMALISERING
 # ==========================================================
-def format_text(text: str) -> str:
-    text = (text or "").replace(". ", ".\n").replace("? ", "?\n").replace("! ", "!\n")
-    return "\n".join(l.strip() for l in text.splitlines() if l.strip())
+_WS_RE = re.compile(r"\s+", flags=re.UNICODE)
+
+
+def normalize_inline(text: str) -> str:
+    """Gjør all whitespace (inkl. \n) om til enkel mellomrom."""
+    return _WS_RE.sub(" ", (text or "")).strip()
 
 
 def is_podcast_like(text: str) -> bool:
@@ -98,6 +138,22 @@ def is_podcast_like(text: str) -> bool:
     keys = ["podcast", "episode", "i studio", "velkommen til", "du lytter"]
     hits = sum(1 for k in keys if k in t)
     return hits >= 2
+
+
+def wrap_block(text: str, width: int) -> str:
+    """
+    Linjebryting for lesbarhet i textarea.
+    Splitter ikke ord.
+    """
+    text = normalize_inline(text)
+    if not text:
+        return ""
+    return textwrap.fill(
+        text,
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
 
 
 # ==========================================================
@@ -114,6 +170,97 @@ def load_waveform(audio_path: pathlib.Path) -> tuple[torch.Tensor, int]:
     else:
         wav = wav.T
     return torch.from_numpy(wav).float(), int(sr)
+
+
+def ensure_wav_for_soundfile(audio_path: pathlib.Path) -> pathlib.Path:
+    """
+    libsndfile/soundfile støtter ofte ikke .webm/.m4a/.mp3 på Windows.
+    Vi konverterer derfor til mono 16k WAV før diarization/waveform-lesing.
+    """
+    audio_path = pathlib.Path(audio_path)
+
+    if audio_path.suffix.lower() in [".wav", ".flac"]:
+        return audio_path
+
+    wav_path = audio_path.with_suffix(".wav")
+
+    # Rebruk hvis eksisterer og er nyere/lik
+    if wav_path.exists():
+        try:
+            if wav_path.stat().st_mtime >= audio_path.stat().st_mtime and wav_path.stat().st_size > 0:
+                return wav_path
+        except OSError:
+            pass
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(audio_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(wav_path),
+    ]
+
+    try:
+        p = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "ffmpeg ble ikke funnet i PATH for backend-prosessen. Installer ffmpeg eller legg ffmpeg/bin i PATH."
+        ) from e
+
+    if p.returncode != 0 or (not wav_path.exists()) or wav_path.stat().st_size == 0:
+        stderr = (p.stderr or "").strip()
+        raise RuntimeError(
+            "Klarte ikke å konvertere lyd til WAV med ffmpeg. "
+            f"Input: {audio_path}. ffmpeg stderr: {stderr[-2000:]}"
+        )
+
+    return wav_path
+
+
+_VOL_MEAN_RE = re.compile(r"mean_volume:\s*(-?inf|[-\d\.]+)\s*dB")
+_VOL_MAX_RE = re.compile(r"max_volume:\s*(-?inf|[-\d\.]+)\s*dB")
+
+
+def ffmpeg_volumedetect(audio_path: pathlib.Path) -> dict[str, float | str]:
+    """
+    Returnerer {"mean_volume_db": float|str, "max_volume_db": float|str}
+    -inf betyr helt null.
+    """
+    cmd = [
+        "ffmpeg",
+        "-i",
+        str(audio_path),
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "NUL" if os.name == "nt" else "/dev/null",
+    ]
+    p = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    txt = (p.stderr or "") + "\n" + (p.stdout or "")
+
+    m_mean = _VOL_MEAN_RE.search(txt)
+    m_max = _VOL_MAX_RE.search(txt)
+
+    def parse(v: str) -> float | str:
+        if v in ("-inf", "inf"):
+            return v
+        try:
+            return float(v)
+        except Exception:
+            return v
+
+    out: dict[str, float | str] = {}
+    if m_mean:
+        out["mean_volume_db"] = parse(m_mean.group(1))
+    if m_max:
+        out["max_volume_db"] = parse(m_max.group(1))
+    return out
 
 
 def ensure_annotation(diar: Any):
@@ -225,12 +372,24 @@ def diarize_whole(audio_path: pathlib.Path, max_speakers: int, podcast_mode: boo
     if diar_pipeline is None:
         return []
 
+    # >>> FIX: alltid WAV før soundfile
+    audio_path = ensure_wav_for_soundfile(audio_path)
+
     waveform, sr = load_waveform(audio_path)
-    diar_out = diar_pipeline(
-        {"waveform": waveform, "sample_rate": sr},
-        min_speakers=1,
-        max_speakers=max_speakers,
-    )
+
+    if DEVICE == "cuda":
+        _gpu_mem("before diarization call")
+
+    with torch.inference_mode():
+        diar_out = diar_pipeline(
+            {"waveform": waveform, "sample_rate": sr},
+            min_speakers=1,
+            max_speakers=max_speakers,
+        )
+
+    if DEVICE == "cuda":
+        _gpu_mem("after diarization call")
+
     diar = ensure_annotation(diar_out)
 
     raw_segments: list[dict] = []
@@ -263,14 +422,31 @@ def diarize_whole(audio_path: pathlib.Path, max_speakers: int, podcast_mode: boo
     return cleaned
 
 
+# ==========================================================
+# LABEL + TURNING
+# ==========================================================
 def label_whisper_segments(whisper_segments: list[dict], diar_segments: list[dict]) -> list[dict]:
+    """
+    Returnerer items med timing:
+      - med diarization: {"speaker": "...", "text": "...", "start": float, "end": float}
+      - uten diarization: {"text": "...", "start": float, "end": float}
+    """
     if not diar_segments:
-        return [{"speaker": "Person 1", "text": (ws.get("text") or "").strip()} for ws in whisper_segments]
+        out = []
+        for ws in whisper_segments:
+            out.append(
+                {
+                    "text": normalize_inline(ws.get("text") or ""),
+                    "start": float(ws.get("start", 0.0) or 0.0),
+                    "end": float(ws.get("end", 0.0) or 0.0),
+                }
+            )
+        return out
 
     labeled: list[dict] = []
     for ws in whisper_segments:
-        ws_start = float(ws.get("start", 0.0))
-        ws_end = float(ws.get("end", 0.0))
+        ws_start = float(ws.get("start", 0.0) or 0.0)
+        ws_end = float(ws.get("end", 0.0) or 0.0)
 
         best_spk = "Ukjent"
         best_ov = 0.0
@@ -280,12 +456,81 @@ def label_whisper_segments(whisper_segments: list[dict], diar_segments: list[dic
                 best_ov = ov
                 best_spk = str(ds["speaker"])
 
-        labeled.append({"speaker": best_spk, "text": (ws.get("text") or "").strip()})
+        labeled.append(
+            {
+                "speaker": best_spk,
+                "text": normalize_inline(ws.get("text") or ""),
+                "start": ws_start,
+                "end": ws_end,
+            }
+        )
     return labeled
 
 
-def render_transcription(labeled: list[dict]) -> str:
-    return format_text("\n".join(f"{s['speaker']}: {s['text']}" for s in labeled if s.get("text")))
+def merge_to_turns(items: list[dict]) -> list[dict]:
+    """
+    Lager "turns"/avsnitt basert på:
+      - speaker-skifte (hvis diarization)
+      - pause > TURN_GAP_S
+      - eller hvis avsnitt blir for langt (PARAGRAPH_MAX_CHARS)
+    """
+    out: list[dict] = []
+    for it in items:
+        txt = normalize_inline(it.get("text") or "")
+        if not txt:
+            continue
+
+        spk = (it.get("speaker") or "").strip()
+        st = float(it.get("start", 0.0) or 0.0)
+        en = float(it.get("end", 0.0) or 0.0)
+
+        if not out:
+            base = {"text": txt, "start": st, "end": en}
+            if spk:
+                base["speaker"] = spk
+            out.append(base)
+            continue
+
+        prev = out[-1]
+        prev_spk = (prev.get("speaker") or "").strip()
+        prev_end = float(prev.get("end", 0.0) or 0.0)
+
+        gap = st - prev_end
+
+        same_speaker = (spk and prev_spk == spk) or (not spk and "speaker" not in prev)
+
+        too_long = len(prev.get("text", "")) >= PARAGRAPH_MAX_CHARS
+        new_paragraph = (gap > TURN_GAP_S) or too_long or (not same_speaker)
+
+        if not new_paragraph:
+            prev["text"] = normalize_inline(prev.get("text", "") + " " + txt)
+            prev["end"] = max(prev_end, en)
+        else:
+            base = {"text": txt, "start": st, "end": en}
+            if spk:
+                base["speaker"] = spk
+            out.append(base)
+
+    return out
+
+
+def render_transcription(items: list[dict]) -> str:
+    turns = merge_to_turns(items)
+
+    blocks: list[str] = []
+    for t in turns:
+        spk = (t.get("speaker") or "").strip()
+        txt = t.get("text") or ""
+        wrapped = wrap_block(txt, WRAP_WIDTH)
+        if not wrapped:
+            continue
+
+        if spk:
+            blocks.append(f"{spk}: {wrapped}")
+        else:
+            blocks.append(wrapped)
+
+    return "\n\n".join(blocks).strip()
 
 
 def detect_speakers_in_text(transcription: str) -> list[str]:
@@ -331,25 +576,39 @@ async def transcribe(
     include_minutes: bool = Form(False),
     include_diarization: bool = Form(False),
 ):
-    """
-    Alltid: Whisper transkripsjon
-    Valgfritt: diarization, møtereferat
-    """
     t0_total = time.perf_counter()
     content = await file.read()
 
-    # create_meeting() kan kaste hvis USB-policy ikke er oppfylt
     try:
         meeting_id, meeting_dir = create_meeting()
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # cache meeting dir for senere PUT-kall
     MEETING_DIRS[meeting_id] = pathlib.Path(meeting_dir)
 
     suffix = pathlib.Path(file.filename).suffix or ".wav"
     audio_path = meeting_dir / f"audio{suffix}"
     audio_path.write_bytes(content)
+
+    # (Valgfritt) stopp tidlig hvis opptaket er stille
+    if REJECT_SILENT_AUDIO:
+        try:
+            vd = ffmpeg_volumedetect(audio_path)
+            maxv = vd.get("max_volume_db", None)
+            if maxv == "-inf":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Opptaket ser ut til å være helt stille (max_volume=-inf). Sjekk riktig mikrofon og at den ikke var muted.",
+                )
+            if isinstance(maxv, float) and maxv < SILENCE_MAX_VOLUME_DB_THRESHOLD:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Opptaket har ekstremt lavt nivå (max_volume={maxv} dB). Sjekk input/gain/mute.",
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[WARN] volumedetect failed: {e}")
 
     # Whisper (alltid)
     t0_asr = time.perf_counter()
@@ -377,8 +636,8 @@ async def transcribe(
         )
     t1_diar = time.perf_counter()
 
-    labeled = label_whisper_segments(whisper_segments, diar_segments)
-    transcription = render_transcription(labeled)
+    labeled_items = label_whisper_segments(whisper_segments, diar_segments)
+    transcription = render_transcription(labeled_items)
 
     # Møtereferat (valgfritt)
     minutes = ""
@@ -387,9 +646,7 @@ async def transcribe(
         minutes = await run_in_threadpool(create_meeting_minutes, transcription)
     t1_sum = time.perf_counter()
 
-    # lagre alltid transkripsjon
     (meeting_dir / "transcription.txt").write_text(transcription, encoding="utf-8")
-    # lagre kun summary hvis generert
     if include_minutes:
         (meeting_dir / "summary.txt").write_text(minutes, encoding="utf-8")
 
@@ -418,10 +675,6 @@ async def transcribe(
 
 @app.put("/meetings/{meeting_id}/speakers")
 async def update_speakers(meeting_id: str, mapping: dict[str, str]):
-    """
-    Oppdaterer speaker-navn i transkripsjon og (hvis finnes) møtereferat.
-    Viktig: møtereferat kan være u-generert (summary.txt finnes ikke).
-    """
     meeting_dir = get_meeting_dir(meeting_id)
 
     t_path = meeting_dir / "transcription.txt"
@@ -458,7 +711,6 @@ async def update_texts(meeting_id: str, payload: dict):
 
     (meeting_dir / "transcription.txt").write_text(transcription, encoding="utf-8")
 
-    # hvis brukeren lagrer et referat, skriv summary.txt (selv om det ikke fantes før)
     if isinstance(minutes, str) and minutes.strip():
         (meeting_dir / "summary.txt").write_text(minutes, encoding="utf-8")
 

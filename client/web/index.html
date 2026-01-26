@@ -72,9 +72,8 @@
             <input id="fileInput" type="file" accept="audio/*" hidden />
           </label>
 
-          <!-- NYTT: valg -->
+          <!-- Valg (default AV: støtte "kun transkripsjon") -->
           <label class="checkbox-container" style="display:flex; gap:8px; align-items:center;">
-            <!-- Default AV så du enkelt kan kjøre KUN transkripsjon -->
             <input type="checkbox" id="minutesCheckbox">
             Lag møtereferat
           </label>
@@ -198,7 +197,6 @@
       const closeSpeakersBtn = document.getElementById("closeSpeakersBtn");
       const saveTextsBtn = document.getElementById("saveTextsBtn");
 
-      // NYTT: valg
       const minutesCheckbox = document.getElementById("minutesCheckbox");
       const diarizationCheckbox = document.getElementById("diarizationCheckbox");
 
@@ -226,23 +224,16 @@
           clearTimings();
           return;
         }
-
         const tr = t.transcription ?? "?";
         const di = t.diarization ?? "?";
         const su = t.summarization ?? "?";
         const to = t.total ?? "?";
-
         timingsEl.innerHTML =
           `Tidsbruk — Transkribering: <b>${tr}</b>s • Diarization: <b>${di}</b>s • Oppsummering: <b>${su}</b>s • Total: <b>${to}</b>s`;
       }
 
-      function wantsMinutes() {
-        return !!minutesCheckbox?.checked;
-      }
-
-      function wantsDiarization() {
-        return !!diarizationCheckbox?.checked;
-      }
+      function wantsMinutes() { return !!minutesCheckbox?.checked; }
+      function wantsDiarization() { return !!diarizationCheckbox?.checked; }
 
       function setWorkingState() {
         transcriptionEl.value = "Jobber...";
@@ -268,12 +259,9 @@
 
       function enableEditors() {
         transcriptionEl.disabled = false;
-
-        // møtereferat redigerbar kun hvis valgt / returnert
         minutesEl.disabled = !wantsMinutes();
-
         saveTextsBtn.disabled = false;
-        editSpeakersBtn.disabled = !currentMeetingId;
+        editSpeakersBtn.disabled = !(currentMeetingId && currentSpeakers.length > 0);
       }
 
       function markDirty() {
@@ -303,7 +291,7 @@
         speakersList.innerHTML = "";
 
         if (!currentSpeakers.length) {
-          speakersHint.textContent = 'Fant ingen "Person X" i transkripsjonen ennå.';
+          speakersHint.textContent = 'Ingen speaker-labels å redigere (kjør "Speaker diarization" for å få Person 1/2/3...).';
           return;
         }
 
@@ -336,7 +324,7 @@
         inputs.forEach((inp) => {
           const id = inp.dataset.speakerId;
           const name = (inp.value || "").trim();
-          if (id) mapping[id] = name; // tom string er også lov
+          if (id) mapping[id] = name;
         });
         return mapping;
       }
@@ -363,20 +351,11 @@
         if (typeof data?.meeting_minutes === "string") {
           minutesEl.value = data.meeting_minutes || (wantsMinutes() ? "" : "Ikke valgt.");
         }
-
         if (typeof data?.transcription === "string") transcriptionEl.value = data.transcription;
 
         renderTimings(data.timings_seconds || null);
 
-        // Hold speakers lokalt så “Rediger deltakere” alltid fungerer
-        if (Array.isArray(data?.speakers)) {
-          currentSpeakers = data.speakers;
-        } else {
-          currentSpeakers = currentSpeakers.map((sp) => ({
-            ...sp,
-            name: mapping[sp.speaker_id] ?? sp.name ?? "",
-          }));
-        }
+        if (Array.isArray(data?.speakers)) currentSpeakers = data.speakers;
 
         renderSpeakers(currentSpeakers);
         markDirty();
@@ -384,11 +363,8 @@
       }
 
       saveSpeakersBtn.addEventListener("click", async () => {
-        try {
-          await saveSpeakerNames();
-        } catch (err) {
-          setStatus("Feil: " + (err?.message || err));
-        }
+        try { await saveSpeakerNames(); }
+        catch (err) { setStatus("Feil: " + (err?.message || err)); }
       });
 
       closeSpeakersBtn.addEventListener("click", () => {
@@ -431,11 +407,8 @@
       }
 
       saveTextsBtn.addEventListener("click", async () => {
-        try {
-          await saveTexts();
-        } catch (err) {
-          setStatus("Feil: " + (err?.message || err));
-        }
+        try { await saveTexts(); }
+        catch (err) { setStatus("Feil: " + (err?.message || err)); }
       });
 
       // ---- Transcribe ----
@@ -445,13 +418,10 @@
 
         const fd = new FormData();
         fd.append("file", fileOrBlob, filename);
-
-        // NYTT: valg sendes til backend
         fd.append("include_minutes", wantsMinutes() ? "1" : "0");
         fd.append("include_diarization", wantsDiarization() ? "1" : "0");
 
         const res = await fetch(TRANSCRIBE_URL, { method: "POST", body: fd });
-
         if (!res.ok) {
           const txt = await res.text();
           throw new Error(txt || ("HTTP " + res.status));
@@ -464,12 +434,8 @@
 
         transcriptionEl.value = data.transcription || "";
 
-        // minutes kan være tom hvis ikke valgt
-        if (wantsMinutes()) {
-          minutesEl.value = data.meeting_minutes || "";
-        } else {
-          minutesEl.value = "Ikke valgt.";
-        }
+        if (wantsMinutes()) minutesEl.value = data.meeting_minutes || "";
+        else minutesEl.value = "Ikke valgt.";
 
         renderTimings(data.timings_seconds || null);
 
@@ -563,3 +529,4 @@
   </script>
 </body>
 </html>
+
