@@ -1,28 +1,203 @@
 from __future__ import annotations
 
 import os
-import requests
+import re
 from typing import List
 
+import requests
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+# ----------------------------
+# Ollama config
+# ----------------------------
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_GENERATE_URL = f"{OLLAMA_HOST}/api/generate"
 
-MODEL = os.getenv("OLLAMA_MODEL", "mistral:latest")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+
+# Default timeouts (seconds)
+OLLAMA_TIMEOUT_S = int(os.getenv("OLLAMA_TIMEOUT_S", "300"))
+OLLAMA_TIMEOUT_S_HEAVY = int(os.getenv("OLLAMA_TIMEOUT_S_HEAVY", "600"))
+
+# Context window — qwen2.5:7b støtter 32K, llama3:8b maks 8K
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
+
+# Chunking
+SUMMARY_CHUNK_MAX_CHARS = int(os.getenv("SUMMARY_CHUNK_MAX_CHARS", "40000"))
+ENABLE_DIRECT_FINAL_SINGLE_CHUNK = os.getenv("ENABLE_DIRECT_FINAL_SINGLE_CHUNK", "1").strip() == "1"
+
+# Token caps — uten think-modell kan vi sette disse høyere
+NOTES_NUM_PREDICT = int(os.getenv("NOTES_NUM_PREDICT", "6000"))
+FINAL_NUM_PREDICT = int(os.getenv("FINAL_NUM_PREDICT", "-1"))  # -1 = ubegrenset
+
+# Optional normalization (you said you likely drop this, but kept for completeness)
+ENABLE_TRANSCRIPTION_NORMALIZATION = os.getenv("ENABLE_TRANSCRIPTION_NORMALIZATION", "0").strip() == "1"
+
+# NEW: compress notes before final (big win for MIL/OKONOMI/OPPDRAG)
+ENABLE_NOTES_COMPRESSION = os.getenv("ENABLE_NOTES_COMPRESSION", "1").strip() == "1"
+NOTES_COMPRESSION_MAX_CHARS = int(os.getenv("NOTES_COMPRESSION_MAX_CHARS", "18000"))
+
 
 SYSTEM_RULES = (
-    "KRAV: Svar må være 100% norsk bokmål. Ikke bruk engelsk. "
-    "Bruk kun informasjon som finnes i teksten. Ikke finn på."
+    "DU ER EN PROFESJONELL MØTEREFERENT FOR NORSKE VIRKSOMHETER.\n"
+    "KRITISK: Svar KUN på norsk bokmål. Aldri bruk engelsk eller andre språk.\n\n"
+    "Språkkrav:\n"
+    "- 100 % norsk bokmål (Norge).\n"
+    "- Ikke bruk danske eller svenske ordformer.\n"
+    "- Bruk offisiell norsk rettskrivning.\n"
+    "- Hvis en skrivemåte kan være dansk/svensk, velg norsk bokmål.\n"
+    "- Eksempel: 'Russland' (ikke 'Rusland').\n\n"
+    "Forkortelser og egennavn:\n"
+    "- Behold ALLE forkortelser nøyaktig slik de står (f.eks. FFI, FOH, HV, NATO, ISR).\n"
+    "- Ikke utvid, forklar eller oversett forkortelser.\n"
+    "- Ikke endre skrivemåten på forkortelser (store/små bokstaver, punktum, bindestrek).\n"
+    "- Behold egennavn (steder, avdelinger, personer) nøyaktig slik de står.\n\n"
+    "Innholdskrav:\n"
+    "- Bruk kun informasjon som eksplisitt finnes i teksten.\n"
+    "- Ikke tolk intensjoner som ikke er sagt.\n"
+    "- Ikke finn på beslutninger eller fakta.\n"
+    "- Hvis noe ikke fremgår: skriv 'Ikke spesifisert'.\n\n"
+    "Kvalitetskrav:\n"
+    "- Skriv profesjonelt og presist.\n"
+    "- Ingen fyllord eller gjentakelser.\n"
+    "- Ingen direkte sitater fra transkripsjonen, med mindre modus eksplisitt krever sitater.\n\n"
+    "Dekkingskrav:\n"
+    "- Referatet skal være så komplett at leseren ikke trenger å gå tilbake til lydopptaket.\n"
+    "- Alle temaer, argumenter, tall, navn og beslutninger fra møtet skal være med.\n"
+    "- Ikke avslutt for tidlig. Skriv til alt er dekket.\n"
 )
 
 
-def _ollama_generate(prompt: str, temperature: float = 0.2, timeout_s: int = 300) -> str:
+MODE_PROMPTS = {
+    "standard": {
+        "notes": (
+            "Identifiser hovedtemaer, konkrete diskusjonspunkter, eventuelle beslutninger, "
+            "ansvar og åpne spørsmål. Skill tydelig mellom hva som er diskutert og hva som er besluttet."
+        ),
+        "final": (
+            "Lag et strukturert og profesjonelt møtereferat som gir full oversikt over "
+            "hva som ble diskutert, hva som ble besluttet, og hva som krever oppfølging."
+        ),
+    },
+    "ide": {
+        "notes": (
+            "Identifiser alle foreslåtte ideer, alternative løsninger, argumenter for og imot, "
+            "samt usikkerhet og åpne problemstillinger. Skill klart mellom forslag og faktiske beslutninger."
+        ),
+        "final": (
+            "Lag et strukturert idéreferat som grupperer: foreslåtte ideer, argumenter og vurderinger, "
+            "fordeler og ulemper, åpne spørsmål og anbefalte videre undersøkelser eller tiltak."
+        ),
+    },
+    "beslutning": {
+        "notes": (
+            "Identifiser eksplisitte beslutninger, alternativer som ble vurdert, begrunnelser, "
+            "eventuelle uenigheter, ansvarlige personer og frister."
+        ),
+        "final": (
+            "Lag et beslutningsreferat med tydelig struktur: hva som ble besluttet, hvilke alternativer som ble vurdert, "
+            "begrunnelse for valgt løsning, hvem som har ansvar, frister og eventuelle uavklarte punkter."
+        ),
+    },
+    "status": {
+        "notes": (
+            "Identifiser status per tema eller prosjekt: hva er fullført, hva pågår, hva er forsinket, "
+            "risikoer og blokkeringer, avhengigheter og neste milepæl."
+        ),
+        "final": (
+            "Lag et strukturert statusreferat som gir oversikt over fremdrift, risiko, avvik, ansvar "
+            "og konkrete neste steg. Skal kunne brukes direkte i styringsmøte."
+        ),
+    },
+    "god": {
+        "notes": (
+            "Identifiser hovedtemaer, viktigste diskusjonspunkter, eventuelle beslutninger, "
+            "ansvar og neste steg. Prioriter det viktigste, men behold nok detaljer til at oppsummeringen blir nyttig."
+        ),
+        "final": (
+            "Lag en god og konsis oppsummering av møtet. Den skal ikke være kjempelang, "
+            "men den må dekke de viktigste temaene, beslutningene og oppfølgingen."
+        ),
+    },
+    "fri": {
+        "notes": (
+            "Identifiser distinkte hovedtemaer (ikke dupliser). For hvert tema: noter konkrete fakta, "
+            "argumenter, tall, navn, beslutninger og åpne spørsmål. Unngå generiske beskrivelser som 'diskutert om X'."
+        ),
+        "final": (
+            "Lag en strukturert møtesammenfatning der du selv velger den mest hensiktsmessige strukturen "
+            "basert på innholdet, ikke et fast skjema."
+        ),
+    },
+    "ir": {
+        "notes": (
+            "Identifiser hovedtemaer i intervjuet. Fjern småprat og irrelevante digresjoner. "
+            "Slå sammen gjentakelser og presiseringer. Dersom intervjuobjektet endrer meningsinnhold "
+            "i et tema underveis, behold den siste og gjeldende versjonen. "
+            "Behold alle navn fullt ut slik de fremkommer i teksten. "
+            "Marker eventuelle direkte sitater tydelig (ordrett)."
+        ),
+        "final": (
+            "Lag et tematisk intervjureferat (IR) etter fastsatte krav for språk, struktur og avsnittsform."
+        ),
+    },
+    "mil": {
+        "notes": (
+            "Trekk ut hovedsaker og beslutningspunkter i en strukturert, disiplinert form. "
+            "For hver sak: fakta/situasjon, vurdering/risiko, handlingsalternativer, anbefaling, beslutning og tiltak."
+        ),
+        "final": (
+            "Lag et strukturert referat etter militær modell (formål/agenda/rammer, sak-for-sak med fakta–vurdering–alternativer–anbefaling–beslutning, og avslutning med tiltaksliste)."
+        ),
+    },
+    "oppdrag": {
+        "notes": (
+            "Trekk ut intensjon/ønsket effekt, rammer, uavklarte premisser, muligheter/risiko, "
+            " handlingsalternativer, anbefalt retning, og videre oppdrag (hvem utreder hva, tidslinje)."
+        ),
+        "final": (
+            "Lag et referat etter intensjonsbasert/oppdragstenkning: intensjon, rammer, felles situasjonsforståelse, "
+            "drøfting, alternativutvikling, anbefalt retning, videre oppdrag og tidslinje."
+        ),
+    },
+    "fremdrift": {
+        "notes": (
+            "Trekk ut status siden sist (leveranser/avvik), kritiske saker, hindringer, "
+            "konkrete tiltak, prioritering, ansvar/forpliktelser, risiko fremover og kontrollpunkt."
+        ),
+        "final": (
+            "Lag et fremdriftsorientert referat med fokus på leveranser, avvik, hindringer, tiltak, prioritering, ansvar og neste kontrollpunkt."
+        ),
+    },
+    "okonomi": {
+        "notes": (
+            "Trekk ut formål, styringskontekst, datagrunnlag, forbruk vs budsjett, avvik (kr/%), "
+            "prognose, årsaker, risiko, tiltak/omprioriteringer, beslutning, rapportering og frister."
+        ),
+        "final": (
+            "Lag et økonomi- og styringsreferat: status/avvik/prognose, årsaker, risiko, tiltak, beslutning, rapportering og kontrollpunkt."
+        ),
+    },
+}
+
+
+# ----------------------------
+# Core helpers
+# ----------------------------
+def _ollama_generate(prompt: str, temperature: float = 0.2, timeout_s: int | None = None, num_predict: int | None = None) -> str:
+    options: dict = {"temperature": float(temperature), "num_ctx": OLLAMA_NUM_CTX}
+    if num_predict is not None:
+        options["num_predict"] = int(num_predict)
     payload = {
         "model": MODEL,
-        "prompt": prompt,
+        "prompt": prompt.rstrip() + "\n\nSvar KUN på norsk bokmål:",
+        "system": SYSTEM_RULES,
         "stream": False,
-        "options": {"temperature": temperature},
+        "options": options,
     }
+    timeout_s = int(timeout_s or OLLAMA_TIMEOUT_S)
 
     r = requests.post(OLLAMA_GENERATE_URL, json=payload, timeout=timeout_s)
     if r.status_code == 404:
@@ -30,14 +205,14 @@ def _ollama_generate(prompt: str, temperature: float = 0.2, timeout_s: int = 300
             f"Fikk 404 fra Ollama på {OLLAMA_GENERATE_URL}. "
             f"Sjekk at OLLAMA_HOST peker riktig."
         )
-
     r.raise_for_status()
     data = r.json()
-    return (data.get("response") or "").strip()
+    raw = (data.get("response") or "").strip()
+    return _THINK_RE.sub("", raw).strip()
 
 
-def _chunk_text_by_lines(text: str, max_chars: int = 12_000) -> List[str]:
-    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+def _chunk_text_by_lines(text: str, max_chars: int) -> List[str]:
+    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
     chunks: List[str] = []
     buf: List[str] = []
     size = 0
@@ -55,11 +230,178 @@ def _chunk_text_by_lines(text: str, max_chars: int = 12_000) -> List[str]:
 
     if buf:
         chunks.append("\n".join(buf))
-
     return chunks
 
 
-def create_meeting_minutes(transcription: str) -> str:
+def _postprocess_norwegian_spelling(text: str) -> str:
+    """
+    Minimal og deterministisk etterkorrigering av noen få vanlige feilformer.
+    VIKTIG: dette er bevisst "lite", for ikke å ødelegge egennavn/forkortelser.
+    """
+    if not text:
+        return text
+
+    corrections = {
+        "Rusland": "Russland",
+        "hedder": "heter",
+        "volym": "volum",
+        "brand": "brann",
+        "brandvern": "brannvern",
+        "litimion": "litiumion",
+        "lithiumion": "litiumion",
+        "mulighed": "mulighet",
+        "muligheden": "muligheten",
+        "organisation": "organisasjon",
+        "organisations": "organisasjons",
+    }
+    for src, dst in corrections.items():
+        text = text.replace(src, dst)
+    return text
+
+
+def _normalize_transcription_no_semantic_change(text: str) -> str:
+    """
+    Retter åpenbare skrivefeil og grammatikk til norsk bokmål uten å endre meningsinnhold.
+    Bevarer forkortelser, egennavn, tall, datoer og tekniske betegnelser.
+    """
+    if not text:
+        return text
+
+    prompt = f"""
+Oppgave:
+- Rett åpenbare skrivefeil og grammatikk til korrekt norsk bokmål.
+- IKKE endre meningsinnhold.
+- IKKE legg til eller fjern informasjon.
+- IKKE omskriv mer enn nødvendig.
+- Behold alle forkortelser og egennavn nøyaktig som i originalen.
+- Behold tall, datoer og tekniske betegnelser.
+
+Returner kun den korrigerte teksten, uten forklaring.
+
+TEKST:
+{text}
+"""
+    corrected = _ollama_generate(prompt, temperature=0.0, timeout_s=OLLAMA_TIMEOUT_S_HEAVY)
+    return _postprocess_norwegian_spelling(corrected)
+
+
+def _compress_notes_for_final(notes_text: str, mode_key: str) -> str:
+    """
+    Komprimerer delnotater før final-pass (reduserer prompt-størrelse kraftig, særlig for MIL/OKONOMI/OPPDRAG).
+    """
+    if not notes_text:
+        return notes_text
+
+    # hard cap: ikke send enorme mengder inn i komprimeringen
+    if len(notes_text) > NOTES_COMPRESSION_MAX_CHARS:
+        notes_text = notes_text[:NOTES_COMPRESSION_MAX_CHARS]
+
+    prompt = f"""
+Oppgave:
+Du skal komprimere DELNOTATER til en kortere, men fortsatt dekkende notatpakke for et FINAL-referat.
+
+Krav:
+- Ikke legg til nye fakta.
+- Ikke fjern viktige tall, datoer, beslutninger, ansvar, frister, risiko eller avklaringer.
+- Slå sammen repetisjon.
+- Behold forkortelser og egennavn nøyaktig som de står.
+- Ikke bruk sitater.
+- Ikke referer til at dette er delnotater.
+
+Returner nøyaktig denne strukturen:
+
+Temaer:
+- ...
+
+Diskusjon:
+- ...
+
+Forslag:
+- ...
+
+Beslutninger:
+- ...
+
+Oppfølgingspunkter (med ansvarlig og frist hvis nevnt):
+- ...
+
+Risikoer/Avklaringer:
+- ...
+
+Modus: {mode_key}
+
+DELNOTATER:
+{notes_text}
+"""
+    compressed = _ollama_generate(prompt, temperature=0.0, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=NOTES_NUM_PREDICT)
+    return _postprocess_norwegian_spelling(compressed)
+
+
+def _length_requirements(transcription: str, mode: str) -> str:
+    words = len((transcription or "").split())
+
+    if mode == "ir":
+        if words <= 700:
+            return "Du MÅ skrive minst 400 ord. Dekk alle temaer grundig."
+        if words <= 1800:
+            return "Du MÅ skrive minst 700 ord. Dekk alle temaer grundig."
+        if words <= 4000:
+            return "Du MÅ skrive minst 1100 ord. Hvert tema skal ha sitt eget avsnitt med detaljer."
+        return "Du MÅ skrive minst 1700 ord. Hvert tema skal ha sitt eget avsnitt med alle detaljer."
+
+    if words <= 500:
+        return "Du MÅ skrive minst 400 ord. Dekk alle punkter grundig."
+    if words <= 1200:
+        return "Du MÅ skrive minst 650 ord. Hvert tema skal ha detaljer, ikke bare én setning."
+    if words <= 2500:
+        return "Du MÅ skrive minst 1000 ord. Hvert tema skal dekkes grundig med argumenter og konklusjoner."
+    if words <= 5000:
+        return "Du MÅ skrive minst 1600 ord. Hvert tema som er diskutert skal ha sin egen seksjon med fullstendig dekning."
+    if words <= 9000:
+        return "Du MÅ skrive minst 2500 ord. Hvert tema skal ha sin egen seksjon. Alle argumenter, beslutninger og oppfølgingspunkter skal med."
+    return "Du MÅ skrive minst 3500 ord. Hvert tema skal ha sin egen seksjon. Alle argumenter, beslutninger, tall og oppfølgingspunkter skal dekkes fullstendig."
+
+
+# ----------------------------
+# Speaker extraction helper
+# ----------------------------
+def _extract_diarized_speakers(transcription: str) -> List[str]:
+    """Plukker ut 'Person N'-etiketter fra diarisert transkripsjon."""
+    found = set(re.findall(r"^(Person\s+\d+):", transcription or "", re.MULTILINE))
+    return sorted(found, key=lambda x: int(re.search(r"\d+", x).group()))
+
+
+def _build_deltakere_hint(transcription: str) -> str:
+    speakers = _extract_diarized_speakers(transcription)
+    if speakers:
+        return (
+            f"Følgende talere er identifisert i transkripsjonen: {', '.join(speakers)}. "
+            "Bruk disse etikett-navnene. Ikke legg til andre navn."
+        )
+    return (
+        "Skriv KUN navn som eksplisitt nevnes med navn i transkripsjonen. "
+        "IKKE finn på, gjett eller legg til navn som ikke finnes i teksten. "
+        "Hvis ingen navn fremgår: Ikke spesifisert."
+    )
+
+
+# ----------------------------
+# Public API
+# ----------------------------
+def create_meeting_minutes(
+    transcription: str,
+    mode: str = "standard",
+    meeting_date_str: str = "",
+    role: str = "Intervjuobjekt",
+) -> str:
+    """
+    Lager referat basert på transkripsjon.
+
+    mode:
+      - standard | ide | beslutning | status | god | fri | ir | mil | oppdrag | fremdrift | okonomi
+    role:
+      - Brukes kun av IR-modus. Typiske verdier: "Vitne", "Varsler", "Omvarslede".
+    """
     transcription = (transcription or "").strip()
     if not transcription:
         return (
@@ -74,20 +416,52 @@ def create_meeting_minutes(transcription: str) -> str:
             "Risikoer / Avklaringer\n- Ikke spesifisert.\n"
         )
 
-    chunks = _chunk_text_by_lines(transcription, max_chars=12_000)
+    if ENABLE_TRANSCRIPTION_NORMALIZATION:
+        transcription = _normalize_transcription_no_semantic_change(transcription)
 
-    notes: List[str] = []
-    for i, ch in enumerate(chunks, start=1):
-        prompt = f"""{SYSTEM_RULES}
+    mode_key = (mode or "standard").strip().lower() or "standard"
+    if mode_key not in MODE_PROMPTS:
+        mode_key = "standard"
 
+    date_line = (meeting_date_str or "").strip() or "Ikke spesifisert."
+    role_line = (role or "Intervjuobjekt").strip() or "Intervjuobjekt"
+    length_req = _length_requirements(transcription, mode_key)
+    deltakere_hint = _build_deltakere_hint(transcription)
+
+    chunks = _chunk_text_by_lines(transcription, max_chars=SUMMARY_CHUNK_MAX_CHARS)
+    use_direct_final = ENABLE_DIRECT_FINAL_SINGLE_CHUNK and len(chunks) == 1
+
+    combined_notes = ""
+    source_block = ""
+
+    if use_direct_final:
+        source_block = f"KILDETRANSKRIPSJON:\n{transcription}"
+    else:
+        notes: List[str] = []
+        for i, ch in enumerate(chunks, start=1):
+            notes_instr = MODE_PROMPTS[mode_key]["notes"]
+            prompt = f"""
 Du får DEL {i}/{len(chunks)} av en transkripsjon. Transkripsjonen kan inneholde linjer som starter med "Person N:".
 
+Modus: {mode_key}
+Dato: {date_line}
+
 Oppgave:
-- Lag KORTE, presise møtenotater fra denne delen.
-- Punktvis, tydelig, kun fakta fra teksten.
+- {notes_instr}
+- Punktvis og konkret, kun fakta fra teksten.
+- Ta med alle vesentlige detaljer fra denne delen (ikke gjør det for kort).
+- Skill tydelig mellom: Diskusjon, Forslag, Beslutninger, Ansvar, Risiko.
+- Ikke gjett. Hvis uklart: skriv 'Ikke spesifisert'.
+- Ikke utvid forkortelser eller egennavn.
 
 Returner i denne strukturen (nøyaktig):
 Temaer:
+- ...
+
+Diskusjon:
+- ...
+
+Forslag:
 - ...
 
 Beslutninger:
@@ -102,52 +476,319 @@ Risikoer/Avklaringer:
 TEKST:
 {ch}
 """
-        notes.append(_ollama_generate(prompt, temperature=0.2))
+            notes.append(_postprocess_norwegian_spelling(_ollama_generate(prompt, temperature=0.2, num_predict=NOTES_NUM_PREDICT)))
 
-    combined_notes = "\n\n".join(
-        f"DELNOTATER {idx}:\n{txt}" for idx, txt in enumerate(notes, start=1)
-    )
+        combined_notes = "\n\n".join(
+            f"DELNOTATER {idx}:\n{txt}" for idx, txt in enumerate(notes, start=1)
+        )
 
-    final_prompt = f"""{SYSTEM_RULES}
+        # Compress notes for all modes when there are multiple chunks
+        if ENABLE_NOTES_COMPRESSION and len(chunks) > 1:
+            compressed = _compress_notes_for_final(combined_notes, mode_key)
+            source_block = f"KOMPRIMERTE DELNOTATER:\n{compressed}"
+        else:
+            source_block = f"DELNOTATER:\n{combined_notes}"
 
-Lag ett samlet, profesjonelt møtereferat basert på delnotatene.
+    # ----------------------------
+    # FINAL PASS per mode
+    # ----------------------------
+    if mode_key == "ir":
+        ir_prompt = f"""
+Dette er et intervjureferat (IR).
 
-FORMAT (nøyaktig med disse overskriftene):
-Tittel
-- ...
+Rolle på intervjuobjekt:
+- {role_line}
 
-Dato
-- ...
+Hovedbestilling:
+Referatet skal være en tematisk oppsummering av innholdet i det transkriberte intervjuet.
 
-Deltakere
-- ...
+Generelle krav:
+- Svar kun på norsk bokmål (Norge).
+- Referatet skal gjengi meningsinnhold, men ikke nødvendigvis ordlyden.
+- Dekningsgrad er viktigere enn korthet. Ikke kutt temaer eller vesentlige detaljer for å spare plass.
+- {length_req}
+- Irrelevante digresjoner, småprat og fyllord skal fjernes.
+- Unngå gjentakelser.
+- Temaer som gjentas, utdypes eller presiseres, skal slås sammen.
+- Dersom intervjuobjektet bruker mange ord eller ikke svarer direkte, oppsummer slik at meningsinnholdet kommer tydelig frem.
+- Dersom intervjuobjektet endrer meningsinnhold i et tema underveis, gjengi den siste og gjeldende versjonen.
+- Referatet skal skrives i preteritum, med unntak av direkte sitater eller der presens/futurum må brukes for å bevare meningen.
+- Direkte sitater: *«sitat»*.
 
-Agenda / Tema
-- ...
+Avsnittsform:
+- Hvert avsnitt skal begynne med én av disse:
+  • «{role_line} forklarte …»
+  • «På spørsmål om [gjengivelse av spørsmålet] forklarte {role_line} …»
+- Ikke bruk andre startformer.
 
-Oppsummering av diskusjon
-- ...
+Navn:
+- Alle navn som nevnes må skrives fullt ut, og i den rolle/kontekst/sammenheng de fremkommer.
 
-Beslutninger
-- ...
+Struktur:
+1) Innledning
+   - Hvem som var til stede (hvis fremkommer).
+   - Bakgrunnen for intervjuet (hvis fremkommer).
+   - Intervjuobjektets bakgrunn (hvis fremkommer).
+2) Hoveddel
+   - Organiser etter hovedtemaer.
+   - Hvert tema skal ha en kort overskrift som presist gjenspeiler temaets innhold.
+3) Avslutning
+   - Om intervjuobjektet hadde spørsmål eller ønsker (hvis fremkommer).
+   - Intervjuerens forklaring på hva som skjer videre (hvis fremkommer).
 
-Oppfølgingspunkter
-- ...
+Forbud:
+- Ikke vurder troverdighet.
+- Ikke tolk motiv eller intensjon.
+- Ikke legg til fakta.
+- Hvis informasjon mangler: skriv 'Ikke spesifisert' der det er relevant.
 
-Neste steg
-- ...
+{source_block}
+"""
+        return _postprocess_norwegian_spelling(_ollama_generate(ir_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
 
-Risikoer / Avklaringer
-- ...
+    if mode_key == "mil":
+        mil_prompt = f"""
+Modus: {mode_key}
+Dato: {date_line}
+
+Møtestruktur: Strukturert og disiplinert (militær modell)
 
 Krav:
-- 100% norsk bokmål
-- Ikke finn på ting
-- Hvis noe mangler: skriv "Ikke spesifisert"
-- Ikke referer til "delnotater" i svaret
-- Ikke skriv på engelsk
+- Svar kun på norsk bokmål (Norge)
+- Ikke utvid eller forklar forkortelser
+- Ikke bruk direkte sitater
+- Ikke finn på noe
+- {length_req}
+- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt temaer eller saker for å spare plass.
+- Hvert tema/sak som er diskutert skal dekkes.
+- Ikke referer til delnotater i svaret
 
-DELNOTATER:
-{combined_notes}
+FORMAT (bruk disse overskriftene):
+
+INNLEDNING
+Formål
+Agenda
+Rammer
+
+HOVEDDEL
+Sak 1 – [kort tittel]
+Situasjonsbeskrivelse (fakta)
+Vurdering (risiko/konsekvens)
+Handlingsalternativer
+Anbefaling
+Beslutning
+
+Sak 2 – [kort tittel]
+... (gjenta ved behov)
+
+AVSLUTNING
+Oppsummering av beslutninger
+Tiltaksliste (hvem gjør hva – frist)
+Risiko og oppfølging (kontrollpunkt)
+
+{source_block}
 """
-    return _ollama_generate(final_prompt, temperature=0.2)
+        return _postprocess_norwegian_spelling(_ollama_generate(mil_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
+
+    if mode_key == "oppdrag":
+        oppdrag_prompt = f"""
+Modus: {mode_key}
+Dato: {date_line}
+
+Møtestruktur: Intensjonsbasert (oppdragstenkning)
+
+Krav:
+- Svar kun på norsk bokmål (Norge)
+- Ikke utvid eller forklar forkortelser
+- Ikke bruk direkte sitater
+- Ikke finn på noe
+- {length_req}
+- Ikke referer til delnotater i svaret
+
+FORMAT (bruk disse overskriftene):
+
+INNLEDNING
+Intensjon (ønsket effekt)
+Rammer (fast vs handlingsrom)
+Forventninger
+
+HOVEDDEL
+Felles situasjonsforståelse (fakta/premisser)
+Drøfting (muligheter/risiko/konsekvens)
+Alternativutvikling (2–3 realistiske alternativer)
+Anbefaling og retning (enighet/beslutning)
+
+AVSLUTNING
+Felles forståelse (hva er vi enige om / rest-usikkerhet)
+Videre oppdrag (hvem utreder hva / hvem beslutter videre)
+Tidslinje (neste milepæl)
+
+{source_block}
+"""
+        return _postprocess_norwegian_spelling(_ollama_generate(oppdrag_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
+
+    if mode_key == "fremdrift":
+        fremdrift_prompt = f"""
+Modus: {mode_key}
+Dato: {date_line}
+
+Møtestruktur: Effektivitets- og fremdriftsorientert
+
+Krav:
+- Svar kun på norsk bokmål (Norge)
+- Ikke utvid eller forklar forkortelser
+- Ikke bruk direkte sitater
+- Ikke finn på noe
+- {length_req}
+- Ikke referer til delnotater i svaret
+
+FORMAT (bruk disse overskriftene):
+
+INNLEDNING
+Status siden sist (leveranser/avvik)
+Hovedfokus i dag (1–3 kritiske saker)
+Suksesskriterium for møtet
+
+HOVEDDEL
+Fremdriftsanalyse (hva hindrer progresjon)
+Tiltaksdiskusjon (konkret og gjennomførbart)
+Prioritering (først / kan vente)
+Forpliktelse (bekreftet ansvar)
+
+AVSLUTNING
+Tiltaksliste (ansvar, frist, avhengigheter)
+Risikovurdering fremover
+Kontrollpunkt (hvordan/når følges det opp)
+
+{source_block}
+"""
+        return _postprocess_norwegian_spelling(_ollama_generate(fremdrift_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
+
+    if mode_key == "okonomi":
+        okonomi_prompt = f"""
+Modus: {mode_key}
+Dato: {date_line}
+
+Møtestruktur: Økonomi og styring
+
+Krav:
+- Svar kun på norsk bokmål (Norge)
+- Ikke utvid eller forklar forkortelser
+- Ikke bruk direkte sitater
+- Ikke finn på noe
+- {length_req}
+- Ikke referer til delnotater i svaret
+
+FORMAT (bruk disse overskriftene):
+
+INNLEDNING
+Formål
+Styringskontekst
+Rapporteringsgrunnlag (datagrunnlag/forutsetninger)
+
+HOVEDDEL
+Økonomisk status (forbruk vs budsjett)
+Avvik (kr og %)
+Prognose ved årsslutt
+Årsaksanalyse
+Risikoanalyse (over-/mindreforbruk, konsekvens)
+Tiltak (kutt/omprioritering/styrking)
+Beslutning
+Rapportering videre (styringslinje)
+
+AVSLUTNING
+Tiltaksliste (ansvarlig – frist)
+Frister (oppdatert prognose/rapportering)
+Kontrollpunkt
+
+{source_block}
+"""
+        return _postprocess_norwegian_spelling(_ollama_generate(okonomi_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
+
+    if mode_key == "fri":
+        free_final_instr = MODE_PROMPTS[mode_key]["final"]
+        free_prompt = f"""
+Modus: {mode_key}
+Dato: {date_line}
+
+{free_final_instr}
+
+Mål:
+- Lag en tydelig og naturlig struktur basert på innholdet.
+- Når møtet mangler klar agenda, organiser i distinkte, ikke-overlappende temaer.
+- Hvert tema skal ha en presis overskrift som faktisk beskriver innholdet (ikke bare "Diskusjon om X").
+- Under hvert tema: beskriv hva som konkret ble sagt, hvilke argumenter som kom frem, og hva som ble besluttet eller avklart.
+- Ikke gjenta samme informasjon under flere temaer.
+- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt temaer eller argumenter for å spare plass.
+- {length_req}
+
+Krav:
+- Svar kun på norsk bokmål (Norge)
+- Ikke utvid eller forklar forkortelser
+- Ikke bruk direkte sitater
+- Ikke finn på noe
+- Hvis informasjon mangler: Ikke spesifisert
+- Ikke referer til delnotater i svaret
+- Ikke bruk "Diskutert om..." som beskrivelse — skriv hva som faktisk ble diskutert
+
+{source_block}
+"""
+        return _postprocess_norwegian_spelling(_ollama_generate(free_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
+
+    # STANDARD / IDE / BESLUTNING / STATUS / GOD  (valg C: mer dekningsgrad)
+    final_instr = MODE_PROMPTS[mode_key]["final"]
+    final_prompt = f"""
+Modus: {mode_key}
+Dato: {date_line}
+
+{final_instr}
+
+KRITISK:
+- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt temaer, argumenter eller nyanser for å spare plass.
+- Hvert tema som er diskutert i møtet skal ha sin egen seksjon eller punkt.
+- Ikke komprimer bort forklaringer som trengs for å forstå temaet.
+- Hvis et tema har nyanser, uenigheter eller perspektiver: behold dem alle.
+- Ikke tving frem beslutninger/oppgaver hvis de ikke finnes.
+- Alt må være forankret i teksten.
+- {length_req}
+- Hvis informasjon mangler: 'Ikke spesifisert'.
+- Ikke referer til delnotater i svaret.
+
+FORMAT (bruk nøyaktig disse overskriftene):
+
+Tittel
+- Kort og beskrivende
+
+Dato
+- {date_line}
+
+Deltakere
+- {deltakere_hint}
+
+Agenda / Tema
+- Strukturert punktliste
+
+Oppsummering av diskusjon
+- Strukturert etter tema
+- Skill mellom drøfting og konklusjon der det faktisk fremkommer
+
+Beslutninger
+- Punktvis, kun faktiske beslutninger
+- Hvis ingen: Ingen beslutninger ble fattet
+
+Oppfølgingspunkter
+- Punktvis
+- Inkluder ansvarlig og frist hvis nevnt
+- Hvis ingen: Ikke spesifisert
+
+Neste steg
+- Konkret og handlingsrettet
+- Hvis ikke fremkommer: Ikke spesifisert
+
+Risikoer / Avklaringer
+- Punktvis
+- Hvis ikke fremkommer: Ikke spesifisert
+
+{source_block}
+"""
+    return _postprocess_norwegian_spelling(_ollama_generate(final_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))

@@ -67,36 +67,95 @@ body {
   width: 180px;
   height: 180px;
   border-radius: 999px;
-  border: 2px solid rgba(255,255,255,0.14);
-  background: radial-gradient(70% 70% at 30% 30%, var(--accent2), var(--accent));
-  box-shadow:
-    0 20px 60px rgba(0,0,0,0.55),
-    0 0 0 10px rgba(255, 59, 92, 0.08);
-  color: white;
-  font-size: 64px;
+  border: none;
   cursor: pointer;
+  position: relative;
   display: grid;
   place-items: center;
-  transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
   user-select: none;
+
+  /* glossy gradient + depth (matches concept image) */
+  background: radial-gradient(circle at 30% 30%,
+    #ff4aa5 0%,
+    var(--accent) 40%,
+    #ff7a00 100%);
+
+  box-shadow:
+    0 20px 60px rgba(0,0,0,0.55),
+    0 0 0 10px rgba(255, 59, 92, 0.08),
+    inset 0 0 0 2px rgba(255,255,255,0.10);
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+
+/* soft glow ring */
+.micButton::after {
+  content: "";
+  position: absolute;
+  inset: -22px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 50% 50%,
+    rgba(255,85,160,0.25) 0%,
+    rgba(255,85,160,0.12) 40%,
+    rgba(255,85,160,0.0) 70%);
+  filter: blur(10px);
+  z-index: -1;
+}
+
+.micInner {
+  width: 92px;
+  height: 92px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: rgba(0,0,0,0.12);
+  box-shadow:
+    inset 0 0 0 2px rgba(255,255,255,0.18),
+    0 10px 30px rgba(0,0,0,0.35);
+}
+
+.micIcon {
+  font-size: 40px;
+  line-height: 1;
+  filter: drop-shadow(0 6px 14px rgba(0,0,0,0.55));
 }
 
 .micButton:hover { transform: translateY(-1px); filter: brightness(1.03); }
+.micButton:active { transform: translateY(1px) scale(0.99); }
+ { transform: translateY(-1px); filter: brightness(1.03); }
 .micButton:active { transform: translateY(1px) scale(0.99); }
 
 /* Recording pulse */
 .micButton.recording {
   box-shadow:
-    0 20px 60px rgba(0,0,0,0.55),
-    0 0 0 14px rgba(255, 59, 92, 0.18),
-    0 0 0 28px rgba(255, 59, 92, 0.10);
+    0 22px 65px rgba(0,0,0,0.60),
+    0 0 0 12px rgba(255,90,170,0.10),
+    0 0 45px rgba(255,90,170,0.25),
+    inset 0 0 0 2px rgba(255,255,255,0.10);
   animation: pulse 1.2s infinite ease-in-out;
 }
 
 @keyframes pulse {
-  0%   { box-shadow: 0 20px 60px rgba(0,0,0,0.55), 0 0 0 14px rgba(255, 59, 92, 0.18), 0 0 0 28px rgba(255, 59, 92, 0.10); }
-  50%  { box-shadow: 0 20px 60px rgba(0,0,0,0.55), 0 0 0 18px rgba(255, 59, 92, 0.22), 0 0 0 36px rgba(255, 59, 92, 0.12); }
-  100% { box-shadow: 0 20px 60px rgba(0,0,0,0.55), 0 0 0 14px rgba(255, 59, 92, 0.18), 0 0 0 28px rgba(255, 59, 92, 0.10); }
+  0% {
+    box-shadow:
+      0 22px 65px rgba(0,0,0,0.60),
+      0 0 0 12px rgba(255,90,170,0.10),
+      0 0 45px rgba(255,90,170,0.22),
+      inset 0 0 0 2px rgba(255,255,255,0.10);
+  }
+  50% {
+    box-shadow:
+      0 22px 65px rgba(0,0,0,0.60),
+      0 0 0 16px rgba(255,90,170,0.14),
+      0 0 60px rgba(255,90,170,0.26),
+      inset 0 0 0 2px rgba(255,255,255,0.12);
+  }
+  100% {
+    box-shadow:
+      0 22px 65px rgba(0,0,0,0.60),
+      0 0 0 12px rgba(255,90,170,0.10),
+      0 0 45px rgba(255,90,170,0.22),
+      inset 0 0 0 2px rgba(255,255,255,0.10);
+  }
 }
 
 .hint {
@@ -325,4 +384,386 @@ textarea {
 .speaker-input:focus {
   border-color: rgba(39, 209, 127, 0.45);
   box-shadow: 0 0 0 3px rgba(39, 209, 127, 0.12);
+}
+
+/* =========================================================
+   CONSENT POPUP (kun lagt til – påvirker ikke resten av UI)
+   Krever: #consentModal og #pageContent i HTML
+========================================================= */
+
+#consentModal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+/* Glass-look som matcher UI-en */
+#consentModal .modal-content {
+  width: min(920px, 92vw);
+  max-height: min(84vh, 900px);
+  overflow: auto;
+
+  background: rgba(15, 20, 36, 0.72);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 18px;
+  box-shadow: 0 30px 90px rgba(0,0,0,0.55);
+  backdrop-filter: blur(12px);
+
+  padding: 22px 24px;
+  color: var(--text);
+}
+
+/* Tittel: tydelig hvit */
+#consentModal .modal-content h2 {
+  margin: 0 0 14px 0;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.2px;
+  color: var(--text);
+  opacity: 0.98;
+}
+
+/* Brukerveiledning tekst */
+#consentModal .modal-content p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: rgba(232,238,252,0.88);
+}
+
+#consentModal .modal-content strong {
+  color: rgba(232,238,252,0.98);
+}
+
+/* Checkbox */
+#consentModal .checkbox-container {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: rgba(232,238,252,0.9);
+}
+
+#consentModal input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ok);
+}
+
+/* Fortsett-knapp (matcher buttons) */
+#continueBtn {
+  margin-top: 14px;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.10);
+  color: rgba(232,238,252,0.85);
+  font-weight: 900;
+  cursor: not-allowed;
+  opacity: 0.55;
+  transition: transform 0.08s ease, background 0.12s ease, opacity 0.12s ease;
+}
+
+#continueBtn.enabled {
+  background: rgba(39, 209, 127, 0.20);
+  border-color: rgba(39, 209, 127, 0.34);
+  color: var(--text);
+  opacity: 1;
+  cursor: pointer;
+}
+
+#continueBtn.enabled:hover {
+  background: rgba(39, 209, 127, 0.26);
+}
+
+#continueBtn:active { transform: translateY(1px); }
+
+/* Blokker siden bak frem til consent */
+#pageContent {
+  pointer-events: none;
+  filter: blur(2px);
+}
+
+.meetingNameRow {
+  width: min(1200px, 94vw);
+  margin: 0 auto;
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.meetingNameLabel {
+  width: min(620px, 92vw);
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.meetingNameInput {
+  width: min(620px, 92vw);
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(255,255,255,0.14);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-size: 15px;
+  outline: none;
+}
+
+.meetingNameInput::placeholder {
+  color: rgba(232, 238, 252, 0.55);
+}
+
+.meetingNameInput:focus {
+  border-color: rgba(39, 209, 127, 0.12);
+  box-shadow: 0 0 0 3px rgba(39, 209, 127, 0.12);
+}
+
+.meetingNameLine {
+  width: min(620px, 92vw);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+
+/* --- UI states: Pause and Save to USB (clean layout) --- */
+.pauseBtn {
+  margin-left: 14px;
+  padding: 12px 18px;
+  border-radius: 14px;
+  opacity: 0.95;
+}
+
+.hidden { display: none !important; }
+
+.saveToUsbContainer {
+  margin-top: 12px;
+  opacity: 0;
+  transform: translateY(10px);
+  max-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: opacity 220ms ease, transform 220ms ease, max-height 220ms ease;
+}
+
+.saveToUsbContainer.visible {
+  opacity: 1;
+  transform: translateY(0);
+  max-height: 140px;
+  pointer-events: auto;
+}
+
+.usbSave {
+  width: auto;
+  min-width: 260px;
+  max-width: 520px;
+  padding: 12px 16px;
+  font-size: 16px;
+  border-radius: 14px;
+}
+
+/* Meeting mode row */
+.meetingModeRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 14px;
+  margin-bottom: 10px;
+}
+
+.meetingModeLabel {
+  font-weight: 600;
+  opacity: 0.95;
+}
+
+.meetingModeSelect {
+  min-width: 280px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  outline: none;
+}
+
+.meetingModeSelect option {
+  color: #000;
+}
+
+.actionRow{
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+/* Audio device row */
+.audioDeviceRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.audioDeviceLabel {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.9;
+  white-space: nowrap;
+}
+
+.audioDeviceSelect {
+  min-width: 220px;
+  max-width: 340px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+}
+
+.audioDeviceSelect option {
+  color: #000;
+}
+
+.audioDeviceRefresh {
+  padding: 8px 11px;
+  font-size: 16px;
+  border-radius: 12px;
+  line-height: 1;
+}
+
+/* =========================================================
+   INFO-KNAPP OG MØTETYPE-PANEL
+========================================================= */
+
+.modeInfoBtn {
+  position: absolute;
+  left: 20px;
+  top: 16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.08);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 900;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.12s ease, transform 0.08s ease;
+  z-index: 100;
+}
+
+.modeInfoBtn:hover {
+  background: rgba(255,255,255,0.14);
+}
+
+.modeInfoBtn:active {
+  transform: scale(0.95);
+}
+
+.modeInfoPanel {
+  position: fixed;
+  top: 62px;
+  left: 16px;
+  width: min(380px, calc(100vw - 32px));
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+
+  background: rgba(11, 18, 36, 0.92);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.55);
+  backdrop-filter: blur(14px);
+
+  padding: 0;
+  z-index: 500;
+
+  opacity: 0;
+  transform: translateY(-8px) scale(0.98);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.modeInfoPanel.visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.modeInfoHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  position: sticky;
+  top: 0;
+  background: rgba(11, 18, 36, 0.95);
+  border-radius: 16px 16px 0 0;
+}
+
+.modeInfoTitle {
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 0.2px;
+  opacity: 0.95;
+}
+
+.modeInfoClose {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+  transition: color 0.1s ease;
+}
+
+.modeInfoClose:hover {
+  color: var(--text);
+}
+
+.modeInfoList {
+  padding: 10px 0 8px;
+}
+
+.modeInfoItem {
+  display: grid;
+  gap: 3px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.modeInfoItem:last-child {
+  border-bottom: none;
+}
+
+.modeInfoName {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.modeInfoDesc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
 }
