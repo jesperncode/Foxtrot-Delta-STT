@@ -6,6 +6,7 @@ from typing import List
 
 import requests
 
+# Fjerner <think>...</think>-blokker som noen modeller (f.eks. DeepSeek) inkluderer i svaret
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
@@ -15,63 +16,108 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_GENERATE_URL = f"{OLLAMA_HOST}/api/generate"
 
-MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+# Hvilken LLM-modell som brukes til referatgenerering
+MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
 
 # Default timeouts (seconds)
-OLLAMA_TIMEOUT_S = int(os.getenv("OLLAMA_TIMEOUT_S", "300"))
-OLLAMA_TIMEOUT_S_HEAVY = int(os.getenv("OLLAMA_TIMEOUT_S_HEAVY", "600"))
+# HEAVY brukes til kall med mer innhold, f.eks. final-pass og komprimering
+OLLAMA_TIMEOUT_S = int(os.getenv("OLLAMA_TIMEOUT_S", "600"))         # Per-chunk notes (32b kan bruke tid)
+OLLAMA_TIMEOUT_S_HEAVY = int(os.getenv("OLLAMA_TIMEOUT_S_HEAVY", "1200"))  # Finalgenerering og komprimering
 
 # Context window — qwen2.5:7b støtter 32K, llama3:8b maks 8K
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 
-# Chunking
+# Chunking — maks tegn per del ved splitting av lange transkripsjoner
 SUMMARY_CHUNK_MAX_CHARS = int(os.getenv("SUMMARY_CHUNK_MAX_CHARS", "40000"))
-ENABLE_DIRECT_FINAL_SINGLE_CHUNK = os.getenv("ENABLE_DIRECT_FINAL_SINGLE_CHUNK", "1").strip() == "1"
+# Hopp over notes-pass og send transkripsjon direkte til final hvis den passer i én chunk
+ENABLE_DIRECT_FINAL_SINGLE_CHUNK = os.getenv("ENABLE_DIRECT_FINAL_SINGLE_CHUNK", "0").strip() == "1"
 
 # Token caps — uten think-modell kan vi sette disse høyere
 NOTES_NUM_PREDICT = int(os.getenv("NOTES_NUM_PREDICT", "6000"))
 FINAL_NUM_PREDICT = int(os.getenv("FINAL_NUM_PREDICT", "-1"))  # -1 = ubegrenset
 
-# Optional normalization (you said you likely drop this, but kept for completeness)
+# Forhåndskorriger transkripsjonen via LLM før oppsummering (som regel deaktivert — øker latens)
 ENABLE_TRANSCRIPTION_NORMALIZATION = os.getenv("ENABLE_TRANSCRIPTION_NORMALIZATION", "0").strip() == "1"
 
-# NEW: compress notes before final (big win for MIL/OKONOMI/OPPDRAG)
+# Komprimer delnotater til én kompakt blokk før final-pass — reduserer prompt-størrelse kraftig
 ENABLE_NOTES_COMPRESSION = os.getenv("ENABLE_NOTES_COMPRESSION", "1").strip() == "1"
+# Hard grense for hvor mye notattekst som sendes inn til komprimeringen
 NOTES_COMPRESSION_MAX_CHARS = int(os.getenv("NOTES_COMPRESSION_MAX_CHARS", "18000"))
 
-
+# Systeminstruksjon som alltid sendes med til modellen — definerer språk, stil og innholdskrav
 SYSTEM_RULES = (
     "DU ER EN PROFESJONELL MØTEREFERENT FOR NORSKE VIRKSOMHETER.\n"
     "KRITISK: Svar KUN på norsk bokmål. Aldri bruk engelsk eller andre språk.\n\n"
     "Språkkrav:\n"
     "- 100 % norsk bokmål (Norge).\n"
     "- Ikke bruk danske eller svenske ordformer.\n"
-    "- Bruk offisiell norsk rettskrivning.\n"
-    "- Hvis en skrivemåte kan være dansk/svensk, velg norsk bokmål.\n"
-    "- Eksempel: 'Russland' (ikke 'Rusland').\n\n"
+    "- Bruk offisiell norsk rettskrivning.\n\n"
     "Forkortelser og egennavn:\n"
-    "- Behold ALLE forkortelser nøyaktig slik de står (f.eks. FFI, FOH, HV, NATO, ISR).\n"
+    "- Behold ALLE forkortelser nøyaktig slik de står.\n"
     "- Ikke utvid, forklar eller oversett forkortelser.\n"
-    "- Ikke endre skrivemåten på forkortelser (store/små bokstaver, punktum, bindestrek).\n"
-    "- Behold egennavn (steder, avdelinger, personer) nøyaktig slik de står.\n\n"
+    "- Behold egennavn nøyaktig slik de står.\n\n"
     "Innholdskrav:\n"
     "- Bruk kun informasjon som eksplisitt finnes i teksten.\n"
     "- Ikke tolk intensjoner som ikke er sagt.\n"
     "- Ikke finn på beslutninger eller fakta.\n"
-    "- Hvis noe ikke fremgår: skriv 'Ikke spesifisert'.\n\n"
+    "- Hvis noe ikke fremgår: skriv 'Ikke spesifisert'.\n"
+    "- ALDRI skriv at noe ble 'besluttet' eller 'bestemt' med mindre "
+    "transkripsjonen eksplisitt bekrefter at en formell beslutning ble fattet. "
+    "Hvis usikkert: skriv 'Ikke besluttet' eller 'Ikke spesifisert'.\n\n"
+    "REFERATKVALITET – KRITISK:\n"
+    "Referatet skal være så komplett og selvstendig at leseren aldri trenger å gå tilbake "
+    "til lydopptaket eller transkripsjonen. Dette krever:\n\n"
+    "1. KONTEKST:\n"
+    "- Forklar alltid hvorfor en sak er oppe — hva er bakgrunnen og hva står på spill.\n"
+    "- Inkluder relevante tall, datoer, lovhenvisninger og tidligere beslutninger som nevnes.\n"
+    "- Hvis eksterne parter, regler eller rammebetingelser påvirker saken: forklar hvordan.\n\n"
+    "2. DYNAMIKK OG ARGUMENTASJON:\n"
+    "- Gjengi hvilke synspunkter og argumenter som kom frem — ikke bare at 'det ble diskutert'.\n"
+    "- Hvis det var uenighet: beskriv hvilke posisjoner som stod mot hverandre og hvorfor.\n"
+    "- Hvis talere er identifisert i transkripsjonen: noter hvem som hadde hvilke synspunkter.\n"
+    "- Hvis talere ikke er identifisert: beskriv posisjonene uten å tilskrive dem til navngitte personer.\n"
+    "- Ikke flat ut debatter til nøytrale beskrivelser — bevar det som faktisk skjedde.\n\n"
+    "3. UTFALL OG KONSEKVENSER:\n"
+    "- Skill alltid strengt mellom diskutert, foreslått og vedtatt.\n"
+    "- Ved avstemninger: oppgi stemmetall og forklar den praktiske konsekvensen av resultatet.\n"
+    "- Hvis regler eller prosedyrer avgjorde utfallet: forklar hva regelen sier og hvilken "
+    "betydning den fikk.\n"
+    "- Skriv aldri at noe 'ble besluttet' hvis det kun ble diskutert.\n\n"
+    "4. OPPFØLGING:\n"
+    "- Noter hvem som har ansvar for hva etter møtet.\n"
+    "- Inkluder frister hvis de nevnes.\n"
+    "- Løft frem uavklarte spørsmål og åpne punkter eksplisitt.\n\n"
     "Kvalitetskrav:\n"
     "- Skriv profesjonelt og presist.\n"
     "- Ingen fyllord eller gjentakelser.\n"
-    "- Ingen direkte sitater fra transkripsjonen, med mindre modus eksplisitt krever sitater.\n\n"
+    "- Ingen direkte sitater.\n"
+    "- Ikke skriv 'Det ble diskutert om X' — skriv hva som faktisk ble sagt og argumentert.\n"
+    "- Ikke gjenta samme informasjon i flere seksjoner.\n\n"
     "Dekkingskrav:\n"
-    "- Referatet skal være så komplett at leseren ikke trenger å gå tilbake til lydopptaket.\n"
-    "- Alle temaer, argumenter, tall, navn og beslutninger fra møtet skal være med.\n"
+    "- Alle temaer, argumenter, tall, navn og beslutninger skal være med.\n"
     "- Ikke avslutt for tidlig. Skriv til alt er dekket.\n"
 )
 
 
+# Modus-spesifikke prompter for notes-pass (chunking) og final-pass.
+# Hvert modus har sin egen notat-instruksjon og sluttinstruksjon.
 MODE_PROMPTS = {
+    # Generell møtesammenfatning uten fast struktur — modellen velger selv hensiktsmessig format
     "standard": {
+        "notes": (
+            "Identifiser maksimalt 5-6 distinkte hovedtemaer. "
+            "Slå sammen beslektet innhold under samme tema fremfor å lage mange små. "
+            "For hvert tema: noter bakgrunn, konkrete argumenter fra ulike parter, "
+            "tall og lovhenvisninger nøyaktig som nevnt, og hva som faktisk ble besluttet eller ikke. "
+            "Ikke dupliser informasjon på tvers av temaer."
+        ),
+        "final": (
+            "Lag en strukturert møtesammenfatning der du selv velger den mest hensiktsmessige strukturen "
+            "basert på innholdet, ikke et fast skjema."
+        ),
+    },
+    # Formelt møtereferat med tydelig skille mellom diskusjon, beslutninger og oppfølging
+    "møtereferat": {
         "notes": (
             "Identifiser hovedtemaer, konkrete diskusjonspunkter, eventuelle beslutninger, "
             "ansvar og åpne spørsmål. Skill tydelig mellom hva som er diskutert og hva som er besluttet."
@@ -81,68 +127,7 @@ MODE_PROMPTS = {
             "hva som ble diskutert, hva som ble besluttet, og hva som krever oppfølging."
         ),
     },
-    "ide": {
-        "notes": (
-            "Identifiser alle foreslåtte ideer, alternative løsninger, argumenter for og imot, "
-            "samt usikkerhet og åpne problemstillinger. Skill klart mellom forslag og faktiske beslutninger."
-        ),
-        "final": (
-            "Lag et strukturert idéreferat som grupperer: foreslåtte ideer, argumenter og vurderinger, "
-            "fordeler og ulemper, åpne spørsmål og anbefalte videre undersøkelser eller tiltak."
-        ),
-    },
-    "beslutning": {
-        "notes": (
-            "Identifiser eksplisitte beslutninger, alternativer som ble vurdert, begrunnelser, "
-            "eventuelle uenigheter, ansvarlige personer og frister."
-        ),
-        "final": (
-            "Lag et beslutningsreferat med tydelig struktur: hva som ble besluttet, hvilke alternativer som ble vurdert, "
-            "begrunnelse for valgt løsning, hvem som har ansvar, frister og eventuelle uavklarte punkter."
-        ),
-    },
-    "status": {
-        "notes": (
-            "Identifiser status per tema eller prosjekt: hva er fullført, hva pågår, hva er forsinket, "
-            "risikoer og blokkeringer, avhengigheter og neste milepæl."
-        ),
-        "final": (
-            "Lag et strukturert statusreferat som gir oversikt over fremdrift, risiko, avvik, ansvar "
-            "og konkrete neste steg. Skal kunne brukes direkte i styringsmøte."
-        ),
-    },
-    "god": {
-        "notes": (
-            "Identifiser hovedtemaer, viktigste diskusjonspunkter, eventuelle beslutninger, "
-            "ansvar og neste steg. Prioriter det viktigste, men behold nok detaljer til at oppsummeringen blir nyttig."
-        ),
-        "final": (
-            "Lag en god og konsis oppsummering av møtet. Den skal ikke være kjempelang, "
-            "men den må dekke de viktigste temaene, beslutningene og oppfølgingen."
-        ),
-    },
-    "fri": {
-        "notes": (
-            "Identifiser distinkte hovedtemaer (ikke dupliser). For hvert tema: noter konkrete fakta, "
-            "argumenter, tall, navn, beslutninger og åpne spørsmål. Unngå generiske beskrivelser som 'diskutert om X'."
-        ),
-        "final": (
-            "Lag en strukturert møtesammenfatning der du selv velger den mest hensiktsmessige strukturen "
-            "basert på innholdet, ikke et fast skjema."
-        ),
-    },
-    "ir": {
-        "notes": (
-            "Identifiser hovedtemaer i intervjuet. Fjern småprat og irrelevante digresjoner. "
-            "Slå sammen gjentakelser og presiseringer. Dersom intervjuobjektet endrer meningsinnhold "
-            "i et tema underveis, behold den siste og gjeldende versjonen. "
-            "Behold alle navn fullt ut slik de fremkommer i teksten. "
-            "Marker eventuelle direkte sitater tydelig (ordrett)."
-        ),
-        "final": (
-            "Lag et tematisk intervjureferat (IR) etter fastsatte krav for språk, struktur og avsnittsform."
-        ),
-    },
+    # Militært referat med sak-for-sak-struktur: fakta → vurdering → alternativer → beslutning
     "mil": {
         "notes": (
             "Trekk ut hovedsaker og beslutningspunkter i en strukturert, disiplinert form. "
@@ -152,34 +137,6 @@ MODE_PROMPTS = {
             "Lag et strukturert referat etter militær modell (formål/agenda/rammer, sak-for-sak med fakta–vurdering–alternativer–anbefaling–beslutning, og avslutning med tiltaksliste)."
         ),
     },
-    "oppdrag": {
-        "notes": (
-            "Trekk ut intensjon/ønsket effekt, rammer, uavklarte premisser, muligheter/risiko, "
-            " handlingsalternativer, anbefalt retning, og videre oppdrag (hvem utreder hva, tidslinje)."
-        ),
-        "final": (
-            "Lag et referat etter intensjonsbasert/oppdragstenkning: intensjon, rammer, felles situasjonsforståelse, "
-            "drøfting, alternativutvikling, anbefalt retning, videre oppdrag og tidslinje."
-        ),
-    },
-    "fremdrift": {
-        "notes": (
-            "Trekk ut status siden sist (leveranser/avvik), kritiske saker, hindringer, "
-            "konkrete tiltak, prioritering, ansvar/forpliktelser, risiko fremover og kontrollpunkt."
-        ),
-        "final": (
-            "Lag et fremdriftsorientert referat med fokus på leveranser, avvik, hindringer, tiltak, prioritering, ansvar og neste kontrollpunkt."
-        ),
-    },
-    "okonomi": {
-        "notes": (
-            "Trekk ut formål, styringskontekst, datagrunnlag, forbruk vs budsjett, avvik (kr/%), "
-            "prognose, årsaker, risiko, tiltak/omprioriteringer, beslutning, rapportering og frister."
-        ),
-        "final": (
-            "Lag et økonomi- og styringsreferat: status/avvik/prognose, årsaker, risiko, tiltak, beslutning, rapportering og kontrollpunkt."
-        ),
-    },
 }
 
 
@@ -187,11 +144,13 @@ MODE_PROMPTS = {
 # Core helpers
 # ----------------------------
 def _ollama_generate(prompt: str, temperature: float = 0.2, timeout_s: int | None = None, num_predict: int | None = None) -> str:
+    """Sender en prompt til Ollama og returnerer svaret renset for think-blokker."""
     options: dict = {"temperature": float(temperature), "num_ctx": OLLAMA_NUM_CTX}
     if num_predict is not None:
         options["num_predict"] = int(num_predict)
     payload = {
         "model": MODEL,
+        # Prompten avsluttes alltid med en eksplisitt norsk-påminnelse
         "prompt": prompt.rstrip() + "\n\nSvar KUN på norsk bokmål:",
         "system": SYSTEM_RULES,
         "stream": False,
@@ -208,19 +167,23 @@ def _ollama_generate(prompt: str, temperature: float = 0.2, timeout_s: int | Non
     r.raise_for_status()
     data = r.json()
     raw = (data.get("response") or "").strip()
+    # Fjern eventuelle <think>-blokker fra svaret før det returneres
     return _THINK_RE.sub("", raw).strip()
 
 
 def _chunk_text_by_lines(text: str, max_chars: int) -> List[str]:
+    """Deler tekst i biter på maks max_chars tegn, uten å kutte midt i en linje."""
     lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
     chunks: List[str] = []
     buf: List[str] = []
     size = 0
 
     for ln in lines:
+        # Klipp enkeltlinjer som alene overskrider grensen
         if len(ln) > max_chars:
             ln = ln[:max_chars]
 
+        # Flush buffer når neste linje ville sprenge grensen
         if size + len(ln) + 1 > max_chars and buf:
             chunks.append("\n".join(buf))
             buf, size = [], 0
@@ -333,33 +296,36 @@ Modus: {mode_key}
 DELNOTATER:
 {notes_text}
 """
-    compressed = _ollama_generate(prompt, temperature=0.0, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=NOTES_NUM_PREDICT)
+    np = NOTES_NUM_PREDICT
+    compressed = _ollama_generate(prompt, temperature=0.0, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=np)
     return _postprocess_norwegian_spelling(compressed)
 
 
 def _length_requirements(transcription: str, mode: str) -> str:
+    """Returnerer en lengdeinstruksjon til modellen basert på transkripsjonens ordtall og modus.
+    Lengre innhold krever et mer detaljert referat — sikrer at modellen ikke kutter for tidlig."""
     words = len((transcription or "").split())
 
     if mode == "ir":
         if words <= 700:
-            return "Du MÅ skrive minst 400 ord. Dekk alle temaer grundig."
+            return "Du MÅ skrive minst 500 ord. Dekk alle temaer grundig – ikke avslutt for tidlig."
         if words <= 1800:
-            return "Du MÅ skrive minst 700 ord. Dekk alle temaer grundig."
+            return "Du MÅ skrive minst 900 ord. Hvert tema skal ha sitt eget avsnitt med alle detaljer."
         if words <= 4000:
-            return "Du MÅ skrive minst 1100 ord. Hvert tema skal ha sitt eget avsnitt med detaljer."
-        return "Du MÅ skrive minst 1700 ord. Hvert tema skal ha sitt eget avsnitt med alle detaljer."
+            return "Du MÅ skrive minst 1400 ord. Hvert tema skal ha sitt eget avsnitt. Ingen poenger skal kuttes."
+        return "Du MÅ skrive minst 2200 ord. Hvert tema skal ha sitt eget avsnitt med alle detaljer og nyanser."
 
     if words <= 500:
-        return "Du MÅ skrive minst 400 ord. Dekk alle punkter grundig."
+        return "Dekk alle temaer grundig med konkrete fakta, argumenter og konklusjon per tema. Ikke avslutt før alt er dekket."
     if words <= 1200:
-        return "Du MÅ skrive minst 650 ord. Hvert tema skal ha detaljer, ikke bare én setning."
+        return "Hvert tema skal ha sitt eget avsnitt med konkrete detaljer, argumenter og hva som ble konkludert. Ikke kutt noe. Ikke gjenta deg selv."
     if words <= 2500:
-        return "Du MÅ skrive minst 1000 ord. Hvert tema skal dekkes grundig med argumenter og konklusjoner."
+        return "Hvert tema skal ha sin egen seksjon. Beskriv presist hva som ble sagt, hvilke argumenter som kom frem og hva som ble konkludert. Ikke gjenta informasjon fra andre seksjoner."
     if words <= 5000:
-        return "Du MÅ skrive minst 1600 ord. Hvert tema som er diskutert skal ha sin egen seksjon med fullstendig dekning."
+        return "Hvert tema som er diskutert skal ha sin egen seksjon med fullstendig og nøyaktig dekning. Ingen saker skal kuttes. Ikke gjenta deg selv på tvers av seksjoner."
     if words <= 9000:
-        return "Du MÅ skrive minst 2500 ord. Hvert tema skal ha sin egen seksjon. Alle argumenter, beslutninger og oppfølgingspunkter skal med."
-    return "Du MÅ skrive minst 3500 ord. Hvert tema skal ha sin egen seksjon. Alle argumenter, beslutninger, tall og oppfølgingspunkter skal dekkes fullstendig."
+        return "Hvert tema skal ha sin egen seksjon. Alle argumenter, nyanser, beslutninger og oppfølgingspunkter skal med. Ikke gjenta informasjon. Ikke avslutt for tidlig."
+    return "Hvert tema skal ha sin egen seksjon. Alle argumenter, beslutninger, tall og oppfølgingspunkter skal dekkes fullstendig og presist – én gang per seksjon, ikke mer."
 
 
 # ----------------------------
@@ -372,6 +338,8 @@ def _extract_diarized_speakers(transcription: str) -> List[str]:
 
 
 def _build_deltakere_hint(transcription: str) -> str:
+    """Lager en deltaker-instruksjon til modellen.
+    Hvis transkripsjon har diariserte talere, brukes disse. Ellers: forbud mot å finne på navn."""
     speakers = _extract_diarized_speakers(transcription)
     if speakers:
         return (
@@ -392,15 +360,11 @@ def create_meeting_minutes(
     transcription: str,
     mode: str = "standard",
     meeting_date_str: str = "",
-    role: str = "Intervjuobjekt",
 ) -> str:
     """
     Lager referat basert på transkripsjon.
 
-    mode:
-      - standard | ide | beslutning | status | god | fri | ir | mil | oppdrag | fremdrift | okonomi
-    role:
-      - Brukes kun av IR-modus. Typiske verdier: "Vitne", "Varsler", "Omvarslede".
+    mode: standard | møtereferat | mil
     """
     transcription = (transcription or "").strip()
     if not transcription:
@@ -419,24 +383,27 @@ def create_meeting_minutes(
     if ENABLE_TRANSCRIPTION_NORMALIZATION:
         transcription = _normalize_transcription_no_semantic_change(transcription)
 
+    # Valider og normaliser modus-streng — fall tilbake til "standard" ved ukjent verdi
     mode_key = (mode or "standard").strip().lower() or "standard"
     if mode_key not in MODE_PROMPTS:
         mode_key = "standard"
 
     date_line = (meeting_date_str or "").strip() or "Ikke spesifisert."
-    role_line = (role or "Intervjuobjekt").strip() or "Intervjuobjekt"
     length_req = _length_requirements(transcription, mode_key)
     deltakere_hint = _build_deltakere_hint(transcription)
 
     chunks = _chunk_text_by_lines(transcription, max_chars=SUMMARY_CHUNK_MAX_CHARS)
+    # Hvis transkripsjon passer i én chunk, kan vi hoppe over notes-passet og gå direkte til final
     use_direct_final = ENABLE_DIRECT_FINAL_SINGLE_CHUNK and len(chunks) == 1
 
     combined_notes = ""
     source_block = ""
 
     if use_direct_final:
+        # Transkripsjon sendes uforandret som kilde til final-pass
         source_block = f"KILDETRANSKRIPSJON:\n{transcription}"
     else:
+        # Fler-chunk-flyt: generer delnotater per chunk, komprimer, send til final-pass
         notes: List[str] = []
         for i, ch in enumerate(chunks, start=1):
             notes_instr = MODE_PROMPTS[mode_key]["notes"]
@@ -482,313 +449,137 @@ TEKST:
             f"DELNOTATER {idx}:\n{txt}" for idx, txt in enumerate(notes, start=1)
         )
 
-        # Compress notes for all modes when there are multiple chunks
+        # Komprimer delnotatene til én kompakt blokk for å redusere prompt-størrelse i final-passet
         if ENABLE_NOTES_COMPRESSION and len(chunks) > 1:
             compressed = _compress_notes_for_final(combined_notes, mode_key)
+            # DEBUG — fjern når ferdig
+            with open("debug_notes.txt", "w", encoding="utf-8") as _dbg:
+                _dbg.write("=== KOMPRIMERTE DELNOTATER ===\n")
+                _dbg.write(compressed)
+                _dbg.write("\n=== SLUTT DELNOTATER ===\n")
             source_block = f"KOMPRIMERTE DELNOTATER:\n{compressed}"
         else:
             source_block = f"DELNOTATER:\n{combined_notes}"
 
     # ----------------------------
-    # FINAL PASS per mode
+    # FINAL PASS per mode — velger prompt basert på modus og kaller modellen én siste gang
     # ----------------------------
-    if mode_key == "ir":
-        ir_prompt = f"""
-Dette er et intervjureferat (IR).
-
-Rolle på intervjuobjekt:
-- {role_line}
-
-Hovedbestilling:
-Referatet skal være en tematisk oppsummering av innholdet i det transkriberte intervjuet.
-
-Generelle krav:
-- Svar kun på norsk bokmål (Norge).
-- Referatet skal gjengi meningsinnhold, men ikke nødvendigvis ordlyden.
-- Dekningsgrad er viktigere enn korthet. Ikke kutt temaer eller vesentlige detaljer for å spare plass.
-- {length_req}
-- Irrelevante digresjoner, småprat og fyllord skal fjernes.
-- Unngå gjentakelser.
-- Temaer som gjentas, utdypes eller presiseres, skal slås sammen.
-- Dersom intervjuobjektet bruker mange ord eller ikke svarer direkte, oppsummer slik at meningsinnholdet kommer tydelig frem.
-- Dersom intervjuobjektet endrer meningsinnhold i et tema underveis, gjengi den siste og gjeldende versjonen.
-- Referatet skal skrives i preteritum, med unntak av direkte sitater eller der presens/futurum må brukes for å bevare meningen.
-- Direkte sitater: *«sitat»*.
-
-Avsnittsform:
-- Hvert avsnitt skal begynne med én av disse:
-  • «{role_line} forklarte …»
-  • «På spørsmål om [gjengivelse av spørsmålet] forklarte {role_line} …»
-- Ikke bruk andre startformer.
-
-Navn:
-- Alle navn som nevnes må skrives fullt ut, og i den rolle/kontekst/sammenheng de fremkommer.
-
-Struktur:
-1) Innledning
-   - Hvem som var til stede (hvis fremkommer).
-   - Bakgrunnen for intervjuet (hvis fremkommer).
-   - Intervjuobjektets bakgrunn (hvis fremkommer).
-2) Hoveddel
-   - Organiser etter hovedtemaer.
-   - Hvert tema skal ha en kort overskrift som presist gjenspeiler temaets innhold.
-3) Avslutning
-   - Om intervjuobjektet hadde spørsmål eller ønsker (hvis fremkommer).
-   - Intervjuerens forklaring på hva som skjer videre (hvis fremkommer).
-
-Forbud:
-- Ikke vurder troverdighet.
-- Ikke tolk motiv eller intensjon.
-- Ikke legg til fakta.
-- Hvis informasjon mangler: skriv 'Ikke spesifisert' der det er relevant.
-
-{source_block}
-"""
-        return _postprocess_norwegian_spelling(_ollama_generate(ir_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
-
     if mode_key == "mil":
+        # Militært modus: todelt prompt (kartlegg saker → skriv etter militær modell)
         mil_prompt = f"""
-Modus: {mode_key}
+Du skal lage et fullstendig militært referat basert på kildeteksten nedenfor.
 Dato: {date_line}
 
-Møtestruktur: Strukturert og disiplinert (militær modell)
+STEG 1 – KARTLEGG ALLE SAKER FØRST:
+Les gjennom hele kildeteksten og identifiser ALLE saker, beslutningspunkter og diskusjoner som er berørt.
+Ikke hopp over noe – også korte saker, risikoer, avklaringer og åpne spørsmål skal med.
 
-Krav:
-- Svar kun på norsk bokmål (Norge)
-- Ikke utvid eller forklar forkortelser
-- Ikke bruk direkte sitater
-- Ikke finn på noe
-- {length_req}
-- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt temaer eller saker for å spare plass.
-- Hvert tema/sak som er diskutert skal dekkes.
-- Ikke referer til delnotater i svaret
-
-FORMAT (bruk disse overskriftene):
+STEG 2 – SKRIV REFERATET etter militær modell:
 
 INNLEDNING
-Formål
-Agenda
-Rammer
+Formål (hvorfor møtet ble holdt)
+Agenda (alle saker som ble behandlet)
+Rammer (føringer, ressurser, tidshorisont hvis nevnt)
 
-HOVEDDEL
-Sak 1 – [kort tittel]
-Situasjonsbeskrivelse (fakta)
-Vurdering (risiko/konsekvens)
-Handlingsalternativer
-Anbefaling
-Beslutning
-
-Sak 2 – [kort tittel]
-... (gjenta ved behov)
+HOVEDDEL – én blokk per sak fra steg 1:
+Sak N – [presis tittel]
+Situasjonsbeskrivelse (fakta som ble presentert)
+Vurdering (risiko, konsekvens, usikkerhet)
+Handlingsalternativer (hva ble vurdert)
+Anbefaling (hva ble anbefalt)
+Beslutning (hva ble besluttet – eller "Ikke besluttet")
 
 AVSLUTNING
-Oppsummering av beslutninger
+Oppsummering av beslutninger (samlet liste)
 Tiltaksliste (hvem gjør hva – frist)
-Risiko og oppfølging (kontrollpunkt)
+Risiko og oppfølging (kontrollpunkt, åpne punkter)
+
+DEKNINGSKRAV – KRITISK:
+- {length_req}
+- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt saker for å spare plass.
+- Alle saker fra steg 1 skal ha sin egen blokk i hoveddelen – ingen saker skal utelates.
+- Behold alle nyanser, uenigheter og perspektiver fra teksten.
+- Skriv til ALT er dekket. Ikke avslutt for tidlig.
+- Ikke finn på noe. Ikke bruk direkte sitater. Ikke utvid forkortelser.
+- Ikke referer til at dette er basert på notater eller transkripsjon i selve teksten.
 
 {source_block}
 """
         return _postprocess_norwegian_spelling(_ollama_generate(mil_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
 
-    if mode_key == "oppdrag":
-        oppdrag_prompt = f"""
-Modus: {mode_key}
-Dato: {date_line}
-
-Møtestruktur: Intensjonsbasert (oppdragstenkning)
-
-Krav:
-- Svar kun på norsk bokmål (Norge)
-- Ikke utvid eller forklar forkortelser
-- Ikke bruk direkte sitater
-- Ikke finn på noe
-- {length_req}
-- Ikke referer til delnotater i svaret
-
-FORMAT (bruk disse overskriftene):
-
-INNLEDNING
-Intensjon (ønsket effekt)
-Rammer (fast vs handlingsrom)
-Forventninger
-
-HOVEDDEL
-Felles situasjonsforståelse (fakta/premisser)
-Drøfting (muligheter/risiko/konsekvens)
-Alternativutvikling (2–3 realistiske alternativer)
-Anbefaling og retning (enighet/beslutning)
-
-AVSLUTNING
-Felles forståelse (hva er vi enige om / rest-usikkerhet)
-Videre oppdrag (hvem utreder hva / hvem beslutter videre)
-Tidslinje (neste milepæl)
-
-{source_block}
-"""
-        return _postprocess_norwegian_spelling(_ollama_generate(oppdrag_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
-
-    if mode_key == "fremdrift":
-        fremdrift_prompt = f"""
-Modus: {mode_key}
-Dato: {date_line}
-
-Møtestruktur: Effektivitets- og fremdriftsorientert
-
-Krav:
-- Svar kun på norsk bokmål (Norge)
-- Ikke utvid eller forklar forkortelser
-- Ikke bruk direkte sitater
-- Ikke finn på noe
-- {length_req}
-- Ikke referer til delnotater i svaret
-
-FORMAT (bruk disse overskriftene):
-
-INNLEDNING
-Status siden sist (leveranser/avvik)
-Hovedfokus i dag (1–3 kritiske saker)
-Suksesskriterium for møtet
-
-HOVEDDEL
-Fremdriftsanalyse (hva hindrer progresjon)
-Tiltaksdiskusjon (konkret og gjennomførbart)
-Prioritering (først / kan vente)
-Forpliktelse (bekreftet ansvar)
-
-AVSLUTNING
-Tiltaksliste (ansvar, frist, avhengigheter)
-Risikovurdering fremover
-Kontrollpunkt (hvordan/når følges det opp)
-
-{source_block}
-"""
-        return _postprocess_norwegian_spelling(_ollama_generate(fremdrift_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
-
-    if mode_key == "okonomi":
-        okonomi_prompt = f"""
-Modus: {mode_key}
-Dato: {date_line}
-
-Møtestruktur: Økonomi og styring
-
-Krav:
-- Svar kun på norsk bokmål (Norge)
-- Ikke utvid eller forklar forkortelser
-- Ikke bruk direkte sitater
-- Ikke finn på noe
-- {length_req}
-- Ikke referer til delnotater i svaret
-
-FORMAT (bruk disse overskriftene):
-
-INNLEDNING
-Formål
-Styringskontekst
-Rapporteringsgrunnlag (datagrunnlag/forutsetninger)
-
-HOVEDDEL
-Økonomisk status (forbruk vs budsjett)
-Avvik (kr og %)
-Prognose ved årsslutt
-Årsaksanalyse
-Risikoanalyse (over-/mindreforbruk, konsekvens)
-Tiltak (kutt/omprioritering/styrking)
-Beslutning
-Rapportering videre (styringslinje)
-
-AVSLUTNING
-Tiltaksliste (ansvarlig – frist)
-Frister (oppdatert prognose/rapportering)
-Kontrollpunkt
-
-{source_block}
-"""
-        return _postprocess_norwegian_spelling(_ollama_generate(okonomi_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
-
-    if mode_key == "fri":
-        free_final_instr = MODE_PROMPTS[mode_key]["final"]
+    if mode_key == "standard":
+        # Standard modus: fri struktur — modellen velger selv den mest naturlige oppbyggingen
         free_prompt = f"""
-Modus: {mode_key}
+Du skal lage en fullstendig møtesammenfatning basert på kildeteksten nedenfor.
 Dato: {date_line}
+Deltakere: {deltakere_hint}
 
-{free_final_instr}
+STEG 1 – KARTLEGG INNHOLDET FØRST:
+Les gjennom hele kildeteksten og identifiser ALLE distinkte temaer, saker og diskusjoner som er berørt.
+Ikke hopp over noe. Også korte diskusjoner, spørsmål, usikkerheter og sidekommentarer som har faglig relevans skal med.
 
-Mål:
-- Lag en tydelig og naturlig struktur basert på innholdet.
-- Når møtet mangler klar agenda, organiser i distinkte, ikke-overlappende temaer.
-- Hvert tema skal ha en presis overskrift som faktisk beskriver innholdet (ikke bare "Diskusjon om X").
-- Under hvert tema: beskriv hva som konkret ble sagt, hvilke argumenter som kom frem, og hva som ble besluttet eller avklart.
-- Ikke gjenta samme informasjon under flere temaer.
-- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt temaer eller argumenter for å spare plass.
+STEG 2 – SKRIV SAMMENFATNINGEN:
+Velg selv den mest naturlige strukturen basert på innholdet – ikke tving det inn i et fast skjema.
+HVERT tema fra steg 1 skal ha sin egen navngitte seksjon.
+
+Krav per seksjon:
+- Overskrift som presist beskriver temaet (ikke "Diskusjon om X" – skriv hva det faktisk dreier seg om)
+- Hva som ble sagt og diskutert – konkret, ikke vagt
+- Hvilke argumenter og synspunkter som kom frem
+- Hva som ble konkludert eller besluttet (eller at det ikke ble konkludert)
+- Hvem som har ansvar og eventuelle frister hvis det fremkommer
+- Hvis noe ble stemt over eller formelt avgjort: beskriv utfallet og konsekvensen, ikke bare resultatet
+- Ved avstemninger med juridiske eller prosedyremessige konsekvenser: forklar ikke bare stemmetallet, men hvorfor utfallet ble som det ble og hva det betyr i praksis for saken videre
+- Ikke gjenta samme informasjon under flere temaer
+
+DEKNINGSKRAV – KRITISK:
 - {length_req}
-
-Krav:
-- Svar kun på norsk bokmål (Norge)
-- Ikke utvid eller forklar forkortelser
-- Ikke bruk direkte sitater
-- Ikke finn på noe
-- Hvis informasjon mangler: Ikke spesifisert
-- Ikke referer til delnotater i svaret
-- Ikke bruk "Diskutert om..." som beskrivelse — skriv hva som faktisk ble diskutert
+- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt, ikke komprimer, ikke hopp over temaer for å spare plass.
+- Alle temaer fra steg 1 skal ha sin egen seksjon – ingen skal slås sammen med mindre de er direkte relatert.
+- Behold alle nyanser, uenigheter og perspektiver fra teksten.
+- Skriv til ALT er dekket. Ikke avslutt for tidlig.
+- Ikke finn på noe. Ikke bruk direkte sitater. Ikke utvid forkortelser.
+- Ikke referer til at dette er basert på notater eller transkripsjon i selve teksten.
 
 {source_block}
 """
         return _postprocess_norwegian_spelling(_ollama_generate(free_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
 
-    # STANDARD / IDE / BESLUTNING / STATUS / GOD  (valg C: mer dekningsgrad)
-    final_instr = MODE_PROMPTS[mode_key]["final"]
-    final_prompt = f"""
-Modus: {mode_key}
+    # Møtereferat modus: strukturert referat med faste avslutningsseksjoner (beslutninger, oppfølging, åpne spørsmål)
+    moetereferat_prompt = f"""
+Du skal lage et fullstendig møtereferat basert på transkripsjonen nedenfor.
 Dato: {date_line}
+Deltakere: {deltakere_hint}
 
-{final_instr}
+STEG 1 – KARTLEGG INNHOLDET FØRST:
+Les gjennom hele kildeteksten og identifiser ALLE distinkte temaer, saker og diskusjoner som er berørt.
+Ikke hopp over noe. Også korte diskusjoner, spørsmål, usikkerheter og sidekommentarer som har faglig relevans skal med.
 
-KRITISK:
-- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt temaer, argumenter eller nyanser for å spare plass.
-- Hvert tema som er diskutert i møtet skal ha sin egen seksjon eller punkt.
-- Ikke komprimer bort forklaringer som trengs for å forstå temaet.
-- Hvis et tema har nyanser, uenigheter eller perspektiver: behold dem alle.
-- Ikke tving frem beslutninger/oppgaver hvis de ikke finnes.
-- Alt må være forankret i teksten.
+STEG 2 – SKRIV REFERATET:
+Skriv et strukturert møtereferat der HVERT tema fra steg 1 får sin egen navngitte seksjon.
+
+Krav per seksjon:
+- Overskrift som presist beskriver temaet (ikke bare "Diskusjon 1" eller "Tema A")
+- Hva som ble sagt og diskutert – konkret, ikke vagt
+- Hvilke argumenter og synspunkter som kom frem
+- Hva som ble konkludert eller besluttet (eller at det ikke ble konkludert)
+- Hvem som har ansvar og eventuelle frister hvis det fremkommer
+
+AVSLUTNING – legg alltid til disse seksjonene til slutt:
+Beslutninger (samlet liste over alle faktiske beslutninger fra møtet – hvis ingen: "Ingen beslutninger ble fattet")
+Oppfølgingspunkter (hvem gjør hva, frist hvis nevnt – hvis ingen: "Ikke spesifisert")
+Åpne spørsmål / uavklarte punkter (hvis noen fremkommer)
+
+DEKNINGSKRAV – KRITISK:
 - {length_req}
-- Hvis informasjon mangler: 'Ikke spesifisert'.
-- Ikke referer til delnotater i svaret.
-
-FORMAT (bruk nøyaktig disse overskriftene):
-
-Tittel
-- Kort og beskrivende
-
-Dato
-- {date_line}
-
-Deltakere
-- {deltakere_hint}
-
-Agenda / Tema
-- Strukturert punktliste
-
-Oppsummering av diskusjon
-- Strukturert etter tema
-- Skill mellom drøfting og konklusjon der det faktisk fremkommer
-
-Beslutninger
-- Punktvis, kun faktiske beslutninger
-- Hvis ingen: Ingen beslutninger ble fattet
-
-Oppfølgingspunkter
-- Punktvis
-- Inkluder ansvarlig og frist hvis nevnt
-- Hvis ingen: Ikke spesifisert
-
-Neste steg
-- Konkret og handlingsrettet
-- Hvis ikke fremkommer: Ikke spesifisert
-
-Risikoer / Avklaringer
-- Punktvis
-- Hvis ikke fremkommer: Ikke spesifisert
+- Dekningsgrad er ALLTID viktigere enn korthet. Ikke kutt, ikke komprimer, ikke hopp over temaer for å spare plass.
+- Hvert tema som er diskutert i møtet skal ha sin egen seksjon – ingen temaer skal slås sammen med mindre de er direkte relatert.
+- Behold alle nyanser, uenigheter og perspektiver som fremkommer i teksten.
+- Skriv til ALT er dekket. Ikke avslutt for tidlig.
+- Ikke bruk "Diskutert om..." som beskrivelse – skriv hva som faktisk ble diskutert.
+- Ikke finn på noe. Ikke bruk direkte sitater. Ikke utvid forkortelser.
+- Ikke referer til at dette er basert på notater eller transkripsjon i selve teksten.
 
 {source_block}
 """
-    return _postprocess_norwegian_spelling(_ollama_generate(final_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))
+    return _postprocess_norwegian_spelling(_ollama_generate(moetereferat_prompt, temperature=0.2, timeout_s=OLLAMA_TIMEOUT_S_HEAVY, num_predict=FINAL_NUM_PREDICT))

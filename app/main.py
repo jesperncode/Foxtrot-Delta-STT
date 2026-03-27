@@ -38,28 +38,47 @@ except Exception:
 from app.pipeline.summarize import create_meeting_minutes
 
 
+# --- ASR-konfigurasjon ---
+# Hvilken openai-whisper-modell som brukes (kun relevant hvis ASR_BACKEND="openai")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo")
+# Målspråk for transkripsjon — "no" gir norsk
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "no")
+# "hf" bruker HuggingFace-modell (nb-whisper), "openai" bruker openai-whisper
 ASR_BACKEND = os.getenv("ASR_BACKEND", "hf").strip().lower()
+# HuggingFace-modell-ID eller lokal sti
 HF_WHISPER_MODEL = os.getenv("HF_WHISPER_MODEL", "NbAiLab/nb-whisper-large-distil-turbo-beta").strip()
+# Antall sekunder per chunk ved HF-transkripsjon — påvirker minnebruk og nøyaktighet
 HF_WHISPER_CHUNK_LENGTH_S = int(os.getenv("HF_WHISPER_CHUNK_LENGTH_S", "30"))
 HF_WHISPER_BATCH_SIZE = int(os.getenv("HF_WHISPER_BATCH_SIZE", "8"))
 
+# --- Diarization-konfigurasjon ---
+# Slå av/på taler-identifikasjon globalt
 DIARIZATION_ENABLED = os.getenv("DIARIZATION_ENABLED", "1") == "1"
 PYANNOTE_MODEL = os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-community-1")
-PYANNOTE_SNAPSHOT_DIR = os.getenv("PYANNOTE_SNAPSHOT_DIR")  # offline snapshot folder
+PYANNOTE_SNAPSHOT_DIR = os.getenv("PYANNOTE_SNAPSHOT_DIR")  # lokal snapshot-mappe for offline-bruk
+# Maks antall talere pipeline kan identifisere
 PYANNOTE_MAX_SPEAKERS = int(os.getenv("PYANNOTE_MAX_SPEAKERS", "6"))
 
+# --- Tekstformatering ---
+# Maks pause mellom segmenter (sekunder) før det regnes som nytt talerbytte
 TURN_GAP_S = float(os.getenv("TURN_GAP_S", "1.1"))
+# Maks pause mellom to segmenter fra samme taler før det lages nytt avsnitt
+SAME_SPEAKER_GAP_S = float(os.getenv("SAME_SPEAKER_GAP_S", "4.0"))
+# Minste blokkstørrelse (tegn) før setningsoppdeling brukes på tekst uten diarisering
+SENTENCE_SPLIT_MIN_CHARS = int(os.getenv("SENTENCE_SPLIT_MIN_CHARS", "120"))
+# Maks tegn i ett avsnitt — lengre tekst tvinges til nytt avsnitt selv for samme taler
 PARAGRAPH_MAX_CHARS = int(os.getenv("PARAGRAPH_MAX_CHARS", "750"))
+# Tekstbredde (tegn) ved linjebryting av transkripsjon
 WRAP_WIDTH = int(os.getenv("WRAP_WIDTH", "110"))
 
 
+# Bruk GPU hvis tilgjengelig — kritisk for ytelse ved transkripsjon og diarisering
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[INFO] Torch device: {DEVICE} | CUDA: {torch.cuda.is_available()}")
 
 
 def _hf_language_name(lang: str) -> str:
+    """Konverterer ISO 639-1 språkkode til fullt navn som HF Whisper forventer."""
     lang = (lang or "").strip().lower()
     mapping = {
         "no": "norwegian",
@@ -81,9 +100,12 @@ class HFWhisperWrapper:
         if AutoModelForSpeechSeq2Seq is None or AutoProcessor is None:
             raise RuntimeError("transformers er ikke installert. Kjør: pip install transformers")
 
+        # float16 sparer VRAM på GPU; float32 er nødvendig på CPU
         torch_dtype = torch.float16 if device == "cuda" else torch.float32
         local = pathlib.Path(model_id_or_path)
+        # Støtter både lokal mappe og HuggingFace model-ID
         model_ref = local if local.exists() else model_id_or_path
+        # HF_HUB_OFFLINE=1 hindrer nettverkskall — standard for offline-deployments
         _local_only = os.getenv("HF_HUB_OFFLINE", "1") == "1"
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_ref,
@@ -98,20 +120,24 @@ class HFWhisperWrapper:
         self.default_language = default_language
 
     def transcribe(self, audio_path: str, language: str | None = None, verbose: bool = False) -> dict:
+        """Transkriberer en lydfil chunk-for-chunk og returnerer dict på samme format som openai-whisper."""
         del verbose  # kept for API compatibility
 
         lang_name = _hf_language_name(language or self.default_language)
         if not isinstance(audio_path, (str, pathlib.Path)):
             raise RuntimeError("HFWhisperWrapper forventer filsti som input i denne implementasjonen.")
 
+        # Konverter til WAV om nødvendig, les som mono float32
         decoded_path = ensure_wav_for_soundfile(pathlib.Path(audio_path))
         arr, sr = sf.read(str(decoded_path), always_2d=False)
         if getattr(arr, "ndim", 1) > 1:
+            # Konverter stereo til mono ved å ta gjennomsnittet av kanalene
             arr = arr.mean(axis=1)
         arr = arr.astype("float32", copy=False)
         sr = int(sr)
         target_sr = int(getattr(self.processor.feature_extractor, "sampling_rate", 16000) or 16000)
         if sr != target_sr:
+            # Resampler med GCD-basert poly-resampling for å unngå store heltallsfaktorer
             g = math.gcd(sr, target_sr)
             arr = resample_poly(arr, target_sr // g, sr // g).astype("float32", copy=False)
             sr = target_sr
@@ -157,6 +183,7 @@ class HFWhisperWrapper:
             "segments": segments,
         }
 
+# Last inn ASR-modell ved oppstart — velger backend basert på ASR_BACKEND-env
 if ASR_BACKEND == "hf":
     model_ref = HF_WHISPER_MODEL or "NbAiLab/nb-whisper-large-distil-turbo-beta"
     print(f"[INFO] ASR backend: hf | model: {model_ref}")
@@ -165,15 +192,21 @@ else:
     print(f"[INFO] ASR backend: openai-whisper | model: {WHISPER_MODEL}")
     whisper_model = whisper.load_model(WHISPER_MODEL, device=DEVICE)
 
+# Last inn pyannote diarization-pipeline ved oppstart (None hvis deaktivert eller ikke installert)
 diar_pipeline = None
 if DIARIZATION_ENABLED and Pipeline is not None:
     try:
+        _local_only = os.getenv("HF_HUB_OFFLINE", "1") == "1"
+        if _local_only:
+            # Tving offline-modus for å hindre nettverkskall under lasting
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
         if PYANNOTE_SNAPSHOT_DIR:
             diar_pipeline = Pipeline.from_pretrained(PYANNOTE_SNAPSHOT_DIR)
             print(f"[INFO] Loaded pyannote pipeline from snapshot dir: {PYANNOTE_SNAPSHOT_DIR}")
         else:
             diar_pipeline = Pipeline.from_pretrained(PYANNOTE_MODEL)
-            print(f"[INFO] Loaded pyannote pipeline from hub: {PYANNOTE_MODEL}")
+            print(f"[INFO] Loaded pyannote pipeline from {'cache' if _local_only else 'hub'}: {PYANNOTE_MODEL}")
 
         # Viktig: flytt pipeline til GPU hvis mulig, ellers ender den ofte pÃ¥ CPU
         if diar_pipeline is not None and DEVICE == "cuda":
@@ -205,10 +238,12 @@ class MeetingDraft:
     podcast_mode: bool
 
 
+# In-memory lagring av utkast — lever kun så lenge serveren kjører
 DRAFTS: dict[str, MeetingDraft] = {}
 
 
 def ensure_draft(meeting_id: str) -> MeetingDraft:
+    """Henter et eksisterende utkast eller kaster 404 om det ikke finnes."""
     d = DRAFTS.get(meeting_id)
     if not d:
         raise HTTPException(status_code=404, detail="Ukjent utkast. Transkriber pÃ¥ nytt.")
@@ -216,6 +251,7 @@ def ensure_draft(meeting_id: str) -> MeetingDraft:
 
 
 _WS_RE = re.compile(r"\s+", flags=re.UNICODE)
+_SENT_END_RE = re.compile(r'(?<=[.?!])\s+(?=[A-ZÆØÅ])')
 
 
 def normalize_inline(text: str) -> str:
@@ -250,6 +286,7 @@ def overlap(a0: float, a1: float, b0: float, b1: float) -> float:
 
 
 def merge_adjacent(segments: list[dict], gap_s: float) -> list[dict]:
+    """Slår sammen påfølgende segmenter fra samme taler dersom pausen mellom dem er kortere enn gap_s."""
     if not segments:
         return []
     segments = sorted(segments, key=lambda x: (x["start"], x["end"]))
@@ -289,9 +326,12 @@ def nearest_big_speaker(seg: dict, big_segments: list[dict]) -> str | None:
 
 
 def cleanup_speakers(segments: list[dict], min_total_speech_s: float, keep_top_speakers: int, merge_gap_s: float) -> list[dict]:
+    """Fjerner støytalere (lite taletid) og tilordner segmentene deres til nærmeste hoved-taler.
+    Behold talere som er blant topp N ELLER har minst min_total_speech_s taletid."""
     if not segments:
         return []
 
+    # Første sammenslåing med liten gap for å stabilisere totaltellinger
     segments = merge_adjacent(segments, gap_s=min(merge_gap_s, 0.3))
 
     totals = compute_total_speech(segments)
@@ -300,6 +340,7 @@ def cleanup_speakers(segments: list[dict], min_total_speech_s: float, keep_top_s
     keep = set([spk for spk, _ in ranked[:keep_top_speakers]])
     keep |= set([spk for spk, t in ranked if t >= min_total_speech_s])
 
+    # Fallback: behold alltid minst 2 talere om ingen møter kriteriene
     if not keep and ranked:
         keep = set([spk for spk, _ in ranked[:2]])
 
@@ -312,6 +353,7 @@ def cleanup_speakers(segments: list[dict], min_total_speech_s: float, keep_top_s
         if s["speaker"] in keep:
             cleaned.append(s)
         else:
+            # Tilordne støy-segmentet til nærmeste godkjente taler
             repl = nearest_big_speaker(s, big_segments)
             ns = s.copy()
             if repl is not None:
@@ -322,6 +364,8 @@ def cleanup_speakers(segments: list[dict], min_total_speech_s: float, keep_top_s
 
 
 def ensure_wav_for_soundfile(audio_path: pathlib.Path) -> pathlib.Path:
+    """Konverterer lydfilen til WAV (mono, 16 kHz) via ffmpeg om nødvendig.
+    Hopper over konvertering hvis en oppdatert WAV allerede finnes."""
     audio_path = pathlib.Path(audio_path)
 
     if audio_path.suffix.lower() in [".wav", ".flac"]:
@@ -329,6 +373,7 @@ def ensure_wav_for_soundfile(audio_path: pathlib.Path) -> pathlib.Path:
 
     wav_path = audio_path.with_suffix(".wav")
 
+    # Gjenbruk eksisterende WAV hvis den er nyere enn kildefilen og ikke tom
     if wav_path.exists():
         try:
             if wav_path.stat().st_mtime >= audio_path.stat().st_mtime and wav_path.stat().st_size > 0:
@@ -400,6 +445,7 @@ def ensure_annotation(diar: Any):
 
 
 def diarize_whole(audio_path: pathlib.Path, max_speakers: int, podcast_mode: bool) -> list[dict]:
+    """Kjører taler-diarisering på hele lydfilen og returnerer rensede segmenter med 'Person N'-etiketter."""
     if diar_pipeline is None:
         return []
 
@@ -419,6 +465,7 @@ def diarize_whole(audio_path: pathlib.Path, max_speakers: int, podcast_mode: boo
     for seg, _, lbl in diar.itertracks(yield_label=True):
         raw_segments.append({"start": float(seg.start), "end": float(seg.end), "speaker": str(lbl)})
 
+    # Podcast-modus beholder typisk kun 2 hovedstemmer; møte-modus tillater flere talere
     if podcast_mode:
         min_total = float(os.getenv("PODCAST_MIN_TOTAL_SPEECH_S", "25"))
         keep_top = int(os.getenv("PODCAST_KEEP_TOP_SPEAKERS", "2"))
@@ -433,6 +480,7 @@ def diarize_whole(audio_path: pathlib.Path, max_speakers: int, podcast_mode: boo
         merge_gap_s=float(os.getenv("PYANNOTE_MERGE_GAP_S", "0.5")),
     )
 
+    # Erstatt pyannote-interne taler-IDer med lesbare "Person N"-etiketter i rekkefølge de dukker opp
     speaker_map: dict[str, str] = {}
     counter = 1
     for s in cleaned:
@@ -509,6 +557,8 @@ def label_whisper_segments(whisper_segments: list[dict], diar_segments: list[dic
 
 
 def merge_to_turns(items: list[dict]) -> list[dict]:
+    """Slår sammen påfølgende segmenter til taleturer.
+    Ny tur startes ved talerskifte, lang pause, eller om avsnittet er blitt for langt."""
     out: list[dict] = []
     for it in items:
         txt = normalize_inline(it.get("text") or "")
@@ -533,7 +583,11 @@ def merge_to_turns(items: list[dict]) -> list[dict]:
         gap = st - prev_end
         same_speaker = (spk and prev_spk == spk) or (not spk and "speaker" not in prev)
         too_long = len(prev.get("text", "")) >= PARAGRAPH_MAX_CHARS
-        new_paragraph = (gap > TURN_GAP_S) or too_long or (not same_speaker)
+        if same_speaker:
+            # Samme taler: fortsett i samme tur med mindre pause er for lang eller avsnittet for stort
+            new_paragraph = (gap > SAME_SPEAKER_GAP_S) or too_long
+        else:
+            new_paragraph = True
 
         if not new_paragraph:
             prev["text"] = normalize_inline(prev.get("text", "") + " " + txt)
@@ -571,7 +625,28 @@ def stabilize_short_turns(turns: list[dict]) -> list[dict]:
             t["speaker"] = prev_spk
     # merge igjen etter relabel
     return merge_to_turns(out)
+
+
+def split_on_sentences(text: str, min_chars: int) -> list[str]:
+    """Del opp en lang, umerkert blokk på setningsgrenser (for tekst uten diarization)."""
+    if len(text) <= min_chars * 2:
+        return [text]
+    parts = _SENT_END_RE.split(text)
+    chunks: list[str] = []
+    current = ""
+    for part in parts:
+        if current and len(current) + len(part) + 1 > min_chars:
+            chunks.append(current.strip())
+            current = part
+        else:
+            current = (current + " " + part).strip() if current else part
+    if current:
+        chunks.append(current.strip())
+    return chunks if chunks else [text]
+
+
 def render_transcription(items: list[dict]) -> str:
+    """Bygger den endelige transkripsjonsteksten fra segmenter — slår sammen, stabiliserer og formaterer."""
     turns = merge_to_turns(items)
     turns = stabilize_short_turns(turns)
 
@@ -585,7 +660,9 @@ def render_transcription(items: list[dict]) -> str:
         if spk:
             blocks.append(f"{spk}: {wrapped}")
         else:
-            blocks.append(wrapped)
+            for chunk in split_on_sentences(wrapped, SENTENCE_SPLIT_MIN_CHARS):
+                if chunk:
+                    blocks.append(chunk)
 
     return "\n\n".join(blocks).strip()
 
@@ -601,6 +678,7 @@ def detect_speakers_in_text(transcription: str) -> list[str]:
 
 
 def _sanitize_folder_name(name: str) -> str:
+    """Fjerner tegn som er ugyldige i Windows-mappenavn og begrenser lengden til 60 tegn."""
     name = (name or "").strip()
     if not name:
         return ""
@@ -644,6 +722,7 @@ def format_norwegian_date(dt: datetime.datetime) -> str:
 
 
 def get_first_usb_drive_root() -> pathlib.Path:
+    """Finner første tilgjengelige USB-minnepenn (removable drive) på Windows via WinAPI."""
     if os.name != "nt":
         raise RuntimeError("USB-autodetect er kun implementert for Windows i denne piloten.")
 
@@ -651,8 +730,9 @@ def get_first_usb_drive_root() -> pathlib.Path:
     GetLogicalDrives = kernel32.GetLogicalDrives
     GetDriveTypeW = kernel32.GetDriveTypeW
 
-    DRIVE_REMOVABLE = 2
+    DRIVE_REMOVABLE = 2  # Windows-konstant for removable media
 
+    # Iterer over alle 26 mulige stasjonsbokstaver via bitmask fra GetLogicalDrives
     bitmask = GetLogicalDrives()
     for i in range(26):
         if not (bitmask & (1 << i)):
@@ -677,7 +757,14 @@ def apply_speaker_mapping(text: str, mapping: dict[str, str]) -> str:
     return out
 
 
+# Opprett logg-katalog ved oppstart hvis den ikke finnes
+LOG_DIR = pathlib.Path(os.getenv("LOG_DIR", "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "errors.log"
+
+
 app = FastAPI()
+# Tillat alle opphav (origins) — nødvendig siden frontend og backend kjører på ulike porter
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -691,6 +778,23 @@ def root():
     return {"status": "ok"}
 
 
+@app.post("/log")
+async def client_log(payload: dict = Body(...)):
+    """Tar imot logg-meldinger fra frontend og skriver dem til felles loggfil."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    context = (payload.get("context") or "frontend").strip()
+    message = (payload.get("message") or "").strip()
+    level = (payload.get("level") or "ERROR").strip().upper()
+    line = f"[{ts}] [{level}] [{context}] {message}\n"
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        print(f"[WARN] Klarte ikke skrive til loggfil: {e}")
+    print(f"[CLIENT-LOG] {line.strip()}")
+    return {"status": "logged"}
+
+
 @app.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
@@ -698,6 +802,8 @@ async def transcribe(
     include_diarization: bool = Form(False),
     mode: str = Form("standard"),
 ):
+    """Hoved-endepunkt: transkriberer lydfil, kjører diarisering og genererer referat om ønsket.
+    Lagrer et utkast i minnet og returnerer resultater til frontend."""
     t0_total = time.perf_counter()
     audio_bytes = await file.read()
     suffix = pathlib.Path(file.filename or "").suffix or ".wav"
@@ -756,7 +862,7 @@ async def transcribe(
         meeting_date_str = format_norwegian_date(datetime.datetime.now())
         t0_sum = time.perf_counter()
         if include_minutes:
-            # Frigi GPU-minne slik at Ollama får full VRAM til LLM-en
+            # Frigi GPU-minne fra ASR/diar slik at Ollama får full VRAM til LLM-en
             if DEVICE == "cuda" and torch.cuda.is_available():
                 try:
                     if isinstance(whisper_model, HFWhisperWrapper):
@@ -840,6 +946,7 @@ async def transcribe(
 
 @app.put("/drafts/{meeting_id}/name")
 async def update_draft_name(meeting_id: str, payload: dict = Body(...)):
+    """Oppdaterer visningsnavnet på et utkast (brukes til å navngi møtet i UI)."""
     d = ensure_draft(meeting_id)
     d.meeting_name = (payload.get("meeting_name") or payload.get("name") or "").strip()
     return {"meeting_id": meeting_id, "meeting_name": d.meeting_name}
@@ -847,6 +954,7 @@ async def update_draft_name(meeting_id: str, payload: dict = Body(...)):
 
 @app.put("/drafts/{meeting_id}/texts")
 async def update_draft_texts(meeting_id: str, payload: dict = Body(...)):
+    """Lagrer manuelt redigert transkripsjon og/eller referat tilbake i utkastet."""
     d = ensure_draft(meeting_id)
     d.transcription = payload.get("transcription", d.transcription) or ""
     d.meeting_minutes = payload.get("meeting_minutes", d.meeting_minutes) or ""
@@ -855,6 +963,7 @@ async def update_draft_texts(meeting_id: str, payload: dict = Body(...)):
 
 @app.put("/drafts/{meeting_id}/speakers")
 async def update_draft_speakers(meeting_id: str, mapping: dict[str, str] = Body(...)):
+    """Tar imot navne-mapping fra UI (f.eks. "Person 1" -> "Kari") og erstatter etiketter i teksten."""
     d = ensure_draft(meeting_id)
 
     d.speaker_mapping = {k: (v or "").strip() for k, v in (mapping or {}).items()}
@@ -875,6 +984,7 @@ async def update_draft_speakers(meeting_id: str, mapping: dict[str, str] = Body(
 
 @app.post("/drafts/{meeting_id}/save")
 async def save_draft(meeting_id: str):
+    """Lagrer ferdig utkast permanent til USB-minnepenn og fjerner det fra in-memory DRAFTS."""
     d = ensure_draft(meeting_id)
 
     try:
@@ -886,6 +996,7 @@ async def save_draft(meeting_id: str):
     out_dir = usb_root / "Foxtrot-Delta-STT" / "meetings" / folder_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Anvend eventuell navn-mapping én siste gang før lagring
     final_transcription = apply_speaker_mapping(d.transcription, d.speaker_mapping)
     final_minutes = apply_speaker_mapping(d.meeting_minutes, d.speaker_mapping) if d.meeting_minutes else ""
 

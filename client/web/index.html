@@ -55,48 +55,16 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       </div>
       <div class="modeInfoList">
         <div class="modeInfoItem">
+          <span class="modeInfoName">Standard</span>
+          <span class="modeInfoDesc">AI velger selv den mest passende strukturen basert på møtets innhold. Alle temaer, argumenter og beslutninger dekkes grundig. Fleksibel og tilpasningsdyktig – passer for de fleste møter.</span>
+        </div>
+        <div class="modeInfoItem">
           <span class="modeInfoName">Møtereferat</span>
-          <span class="modeInfoDesc">Klassisk strukturert møtereferat med deltakere, saksliste, diskusjoner og vedtak. Passer for de fleste ordinære møter.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Ideutvikling</span>
-          <span class="modeInfoDesc">Fokuserer på ideer som ble presentert, diskutert og videreutviklet. Egnet for kreative møter, workshops og brainstorming.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Oppsummering</span>
-          <span class="modeInfoDesc">Kort og presis oppsummering av møtets viktigste punkter. Raskt å lese – god for raske synkroniseringsmøter.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Fri struktur</span>
-          <span class="modeInfoDesc">AI velger selv den mest passende strukturen basert på møtets innhold. Fleksibel og tilpasningsdyktig.</span>
+          <span class="modeInfoDesc">Klassisk strukturert møtereferat med deltakere, saksliste, diskusjoner, beslutninger og oppfølgingspunkter. Gir full oversikt over hva som ble diskutert, hva som ble besluttet, og hva som krever oppfølging.</span>
         </div>
         <div class="modeInfoItem">
           <span class="modeInfoName">Strukturert (militær)</span>
-          <span class="modeInfoDesc">Bruker militær beslutningsmetodikk: fakta → vurdering → handlingsalternativer → beslutning. Egnet for strukturert analyse og beslutningstaking.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Intensjonsbasert</span>
-          <span class="modeInfoDesc">Oppdragsbasert format: intensjon → situasjon → diskusjon → beslutning. Egnet for operativ planlegging der hensikt og retning er viktig.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Fremdrift</span>
-          <span class="modeInfoDesc">Fokuserer på leveranser, hindringer og planlagte tiltak. Egnet for prosjekt- og sprintmøter.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Økonomi og styring</span>
-          <span class="modeInfoDesc">Strukturert økonomirapport: budsjett vs. regnskap → prognose → tiltak. For finansielle gjennomganger og styremøter.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Beslutningsreferat</span>
-          <span class="modeInfoDesc">Dokumenterer kun beslutninger som ble fattet, med begrunnelse og ansvarlige. Kortfattet og handlingsorientert.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">Statusrapport</span>
-          <span class="modeInfoDesc">Oppsummering av status på prosjekt eller produkt, med nøkkeltall og fremdrift. Passer for faste statusmøter.</span>
-        </div>
-        <div class="modeInfoItem">
-          <span class="modeInfoName">IR</span>
-          <span class="modeInfoDesc">Intervjureferat med roller og direkte sitater. Egnet for intervjuer, samtaler og referatføring av enkeltpersoners utsagn.</span>
+          <span class="modeInfoDesc">Bruker militær beslutningsmetodikk: fakta → vurdering → handlingsalternativer → anbefaling → beslutning. Egnet for strukturert analyse, operativ planlegging og beslutningstaking.</span>
         </div>
       </div>
     </div>
@@ -124,19 +92,9 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
         <div class="meetingModeRow">
           <div class="meetingModeLabel">Møtetype</div>
           <select id="meetingMode" class="meetingModeSelect">
-            <option value="standard" selected>Møtereferat</option>
-            <option value="ide">Ideutvikling</option>
-            <option value="god">Oppsummering</option>
-            <option value="fri">Fri struktur</option>
-
+            <option value="standard" selected>Standard</option>
+            <option value="møtereferat">Møtereferat</option>
             <option value="mil">Strukturert (militær)</option>
-            <option value="oppdrag">Intensjonsbasert</option>
-            <option value="fremdrift">Fremdrift</option>
-            <option value="okonomi">Økonomi og styring</option>
-
-            <option value="beslutning">Beslutningsreferat</option>
-            <option value="status">Statusrapport</option>
-            <option value="ir">IR</option>
           </select>
         </div>
 
@@ -347,6 +305,20 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
     let currentMeetingId = null;
     let currentSpeakers = [];
 
+    async function logToBackend(err, context) {
+      try {
+        await fetch(API_BASE + "/log", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            level: "ERROR",
+            context: context || "frontend",
+            message: (err?.stack || err?.message || String(err)).slice(0, 2000)
+          })
+        });
+      } catch (_) {}
+    }
+
     function setStatus(text) { statusEl.textContent = text || ""; }
     function clearTimings() { timingsEl.innerHTML = ""; }
 
@@ -523,7 +495,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
 
     saveSpeakersBtn.addEventListener("click", async () => {
       try { await saveSpeakerNamesRam(); }
-      catch (e) { setStatus("Feil: " + (e?.message || e)); }
+      catch (e) { await logToBackend(e, "save-speakers"); setStatus("Feil: " + (e?.message || e)); }
     });
 
     closeSpeakersBtn.addEventListener("click", () => {
@@ -532,12 +504,12 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
 
     saveMeetingNameBtn.addEventListener("click", async () => {
       try { await saveMeetingNameRam(); }
-      catch (e) { meetingNameHint.textContent = "Feil: " + (e?.message || e); }
+      catch (e) { await logToBackend(e, "save-meeting-name"); meetingNameHint.textContent = "Feil: " + (e?.message || e); }
     });
 
     saveToUsbBtn.addEventListener("click", async () => {
       try { await saveAllToUsb(); }
-      catch (e) { setStatus("Feil: " + (e?.message || e)); }
+      catch (e) { await logToBackend(e, "save-to-usb"); setStatus("Feil: " + (e?.message || e)); }
     });
 
     pickFileBtn.addEventListener("click", () => fileInput.click());
@@ -614,6 +586,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
             try {
               await sendAudio(blob, "audio.webm");
             } catch (err) {
+              await logToBackend(err, "transcribe-mic");
               setStatus("Feil: " + (err?.message || err));
               minutesEl.value = "Feil.";
               transcriptionEl.value = "Feil.";
@@ -638,6 +611,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
           setStatus("Stopper opptak?");
         }
       } catch (err) {
+        await logToBackend(err, "microphone");
         setStatus("Feil med mikrofon: " + (err?.message || err));
       }
     });
@@ -651,6 +625,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       try {
         await sendAudio(f, f.name || "audio.wav");
       } catch (err) {
+        await logToBackend(err, "transcribe-upload");
         setStatus("Feil: " + (err?.message || err));
         minutesEl.value = "Feil.";
         transcriptionEl.value = "Feil.";
