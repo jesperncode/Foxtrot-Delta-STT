@@ -17,7 +17,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_GENERATE_URL = f"{OLLAMA_HOST}/api/generate"
 
 # Hvilken LLM-modell som brukes til referatgenerering
-MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:32b ")
 
 # Default timeouts (seconds)
 # HEAVY brukes til kall med mer innhold, f.eks. final-pass og komprimering

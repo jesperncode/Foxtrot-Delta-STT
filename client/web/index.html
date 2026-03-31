@@ -5,9 +5,77 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Foxtrot-Delta STT</title>
   <link rel="stylesheet" href="css/styles.css" />
+  <style>
+    .loginModal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .75);
+      z-index: 300;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .loginBox {
+      background: var(--bg-card, #1e2a3a);
+      padding: 2.5rem 2rem;
+      border-radius: 14px;
+      width: min(90vw, 380px);
+      text-align: center;
+      box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    }
+    .loginTitle { margin: 0 0 .5rem; font-size: 1.4rem; }
+    .loginSub   { margin: 0 0 1.5rem; opacity: .7; font-size: .95rem; }
+    .loginInput {
+      width: 100%;
+      box-sizing: border-box;
+      padding: .75rem 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--border, #3a4a5a);
+      background: var(--bg, #0d1b2a);
+      color: var(--text, #e0e8f0);
+      font-size: 1rem;
+      margin-bottom: .6rem;
+    }
+    .loginInput:focus { outline: 2px solid var(--accent, #2563eb); border-color: transparent; }
+    .loginError {
+      min-height: 1.3rem;
+      margin-bottom: .6rem;
+      color: #ff6b6b;
+      font-size: .9rem;
+    }
+    .loginBtn {
+      width: 100%;
+      padding: .8rem;
+      background: var(--accent, #2563eb);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    .loginBtn:disabled { opacity: .5; cursor: default; }
+    .loginBtn:not(:disabled):hover { opacity: .9; }
+  </style>
 </head>
 
 <body>
+  <div id="loginModal" class="loginModal" style="display:none;">
+    <div class="loginBox">
+      <h2 class="loginTitle">Foxtrot-Delta STT</h2>
+      <p class="loginSub">Skriv inn API-nøkkel for å fortsette</p>
+      <input
+        type="password"
+        id="apiKeyInput"
+        class="loginInput"
+        placeholder="API-nøkkel"
+        autocomplete="current-password"
+      />
+      <div id="loginError" class="loginError"></div>
+      <button id="loginBtn" class="loginBtn">Logg inn</button>
+    </div>
+  </div>
+
   <div id="consentModal">
   <div class="modal-content">
     <h2>Viktig informasjon</h2>
@@ -210,6 +278,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
   }
   function initApp(){
     const API_BASE = "http://localhost:8000";
+    const apiKey   = localStorage.getItem("api_key") || "";
     const TRANSCRIBE_URL = API_BASE + "/transcribe";
 
     const DRAFT_NAME_URL     = (id) => API_BASE + `/drafts/${encodeURIComponent(id)}/name`;
@@ -309,7 +378,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       try {
         await fetch(API_BASE + "/log", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
           body: JSON.stringify({
             level: "ERROR",
             context: context || "frontend",
@@ -417,7 +486,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       setStatus("Lagrer deltaker-navn?");
       const res = await fetch(DRAFT_SPEAKERS_URL(currentMeetingId), {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
         body: JSON.stringify(mapping),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -448,7 +517,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       meetingNameHint.textContent = "Lagrer navn...";
       const res = await fetch(DRAFT_NAME_URL(currentMeetingId), {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
         body: JSON.stringify({ meeting_name: name }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -464,7 +533,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       };
       const res = await fetch(DRAFT_TEXTS_URL(currentMeetingId), {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -477,7 +546,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       await pushTextsToRam();
 
       setStatus("Lagrer til USB?");
-      const res = await fetch(DRAFT_SAVE_URL(currentMeetingId), { method: "POST" });
+      const res = await fetch(DRAFT_SAVE_URL(currentMeetingId), { method: "POST", headers: { "X-API-Key": apiKey } });
       if (!res.ok) throw new Error(await res.text());
 
       const data = await res.json();
@@ -529,7 +598,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       const meetingModeEl = document.getElementById("meetingMode");
       fd.append("mode", (meetingModeEl && meetingModeEl.value) ? meetingModeEl.value : "standard");
 
-      const res = await fetch(TRANSCRIBE_URL, { method: "POST", body: fd });
+      const res = await fetch(TRANSCRIBE_URL, { method: "POST", headers: { "X-API-Key": apiKey }, body: fd });
       if (!res.ok) throw new Error(await res.text());
 
       const data = await res.json();
@@ -639,8 +708,47 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       }
     });
   }
+  function showLoginModal() {
+    const modal   = document.getElementById("loginModal");
+    const input   = document.getElementById("apiKeyInput");
+    const btn     = document.getElementById("loginBtn");
+    const errEl   = document.getElementById("loginError");
+
+    modal.style.display = "flex";
+    input.focus();
+
+    async function attemptLogin() {
+      const key = input.value.trim();
+      if (!key) { errEl.textContent = "Skriv inn en API-nøkkel."; return; }
+      btn.disabled = true;
+      errEl.textContent = "";
+      try {
+        const res = await fetch("http://localhost:8000/ping", {
+          headers: { "X-API-Key": key }
+        });
+        if (res.ok) {
+          localStorage.setItem("api_key", key);
+          modal.style.display = "none";
+          startAfterConsent(initApp);
+        } else {
+          errEl.textContent = "Ugyldig API-nøkkel.";
+        }
+      } catch (_) {
+        errEl.textContent = "Kunne ikke nå serveren.";
+      }
+      btn.disabled = false;
+    }
+
+    btn.addEventListener("click", attemptLogin);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") attemptLogin(); });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
-    startAfterConsent(initApp);
+    if (localStorage.getItem("api_key")) {
+      startAfterConsent(initApp);
+    } else {
+      showLoginModal();
+    }
   });
   </script>
 </body>

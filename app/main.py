@@ -26,9 +26,11 @@ except Exception:
     AutoModelForSpeechSeq2Seq = None
     AutoProcessor = None
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 try:
     from pyannote.audio import Pipeline  # type: ignore
@@ -763,8 +765,27 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "errors.log"
 
 
+API_KEY = os.getenv("API_KEY", "").strip()
+
+
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if API_KEY:
+            key = request.headers.get("X-API-Key", "")
+            if key != API_KEY:
+                return JSONResponse(
+                    {"detail": "Ugyldig eller manglende API-nøkkel"},
+                    status_code=403,
+                )
+        return await call_next(request)
+
+
 app = FastAPI()
-# Tillat alle opphav (origins) — nødvendig siden frontend og backend kjører på ulike porter
+# APIKeyMiddleware legges til først (innerst) slik at CORSMiddleware (ytterst) alltid
+# legger til CORS-headere — også på 403-svar fra API-nøkkelsjekken.
+app.add_middleware(APIKeyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -775,6 +796,12 @@ app.add_middleware(
 
 @app.get("/")
 def root():
+    return {"status": "ok"}
+
+
+@app.get("/ping")
+def ping():
+    """Brukes av frontend for å validere API-nøkkelen."""
     return {"status": "ok"}
 
 
