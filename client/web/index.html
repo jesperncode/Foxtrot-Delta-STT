@@ -76,7 +76,7 @@
     </div>
   </div>
 
-  <div id="consentModal">
+  <div id="consentModal" style="display:none;">
   <div class="modal-content">
     <h2>Viktig informasjon</h2>
     <p>
@@ -254,6 +254,8 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       return;
     }
 
+    modal.style.display = "flex";
+
     const sync = () => {
       const ok = checkbox.checked;
       btn.disabled = !ok;
@@ -277,7 +279,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
     });
   }
   function initApp(){
-    const API_BASE = "http://localhost:8000";
+    const API_BASE = "http://34.52.199.214:8000";
     const apiKey   = localStorage.getItem("api_key") || "";
     const TRANSCRIBE_URL = API_BASE + "/transcribe";
 
@@ -723,7 +725,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       btn.disabled = true;
       errEl.textContent = "";
       try {
-        const res = await fetch("http://localhost:8000/ping", {
+        const res = await fetch("http://34.52.199.214:8000/ping", {
           headers: { "X-API-Key": key }
         });
         if (res.ok) {
