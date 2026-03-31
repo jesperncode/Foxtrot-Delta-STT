@@ -327,6 +327,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
     const refreshDevicesBtn = document.getElementById("refreshDevicesBtn");
 
     async function refreshAudioDevices() {
+      if (!navigator.mediaDevices) return;
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const inputs = devices.filter(d => d.kind === "audioinput");
@@ -350,8 +351,10 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       } catch (e) {}
     }
 
-    refreshAudioDevices();
-    navigator.mediaDevices.addEventListener("devicechange", refreshAudioDevices);
+    if (navigator.mediaDevices) {
+      refreshAudioDevices();
+      navigator.mediaDevices.addEventListener("devicechange", refreshAudioDevices);
+    }
     refreshDevicesBtn.addEventListener("click", refreshAudioDevices);
 
     modeInfoBtn.addEventListener("click", (e) => {
@@ -638,6 +641,10 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
     micButton.addEventListener("click", async () => {
       try {
         if (!isRecording) {
+          if (!navigator.mediaDevices) {
+            setStatus("Mikrofon krever HTTPS. Bruk filopplasting i stedet.");
+            return;
+          }
           const deviceId = audioDeviceSelect.value;
           const audioConstraint = deviceId ? { deviceId: { exact: deviceId } } : true;
           const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint });
