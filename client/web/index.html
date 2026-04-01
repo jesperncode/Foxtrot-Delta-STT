@@ -279,7 +279,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
     });
   }
   function initApp(){
-    const API_BASE = "http://34.52.199.214:8000";
+    const API_BASE = "http://35.210.247.48:8000";
     const apiKey   = localStorage.getItem("api_key") || "";
     const TRANSCRIBE_URL = API_BASE + "/transcribe";
 
@@ -732,7 +732,7 @@ Etter introduksjonen kan motet gjennomfores som normalt. Systemet handterer lope
       btn.disabled = true;
       errEl.textContent = "";
       try {
-        const res = await fetch("http://34.52.199.214:8000/ping", {
+        const res = await fetch("http://35.210.247.48:8000/ping", {
           headers: { "X-API-Key": key }
         });
         if (res.ok) {
