@@ -156,9 +156,9 @@ class HFWhisperWrapper:
                 continue
 
             inputs = self.processor(chunk, sampling_rate=sr, return_tensors="pt")
-            input_features = inputs["input_features"].to(torch_device)
-            if self.device == "cuda":
-                input_features = input_features.to(dtype=self.torch_dtype)
+            actual_device = next(self.model.parameters()).device
+            actual_dtype = next(self.model.parameters()).dtype
+            input_features = inputs["input_features"].to(device=actual_device, dtype=actual_dtype)
 
             with torch.inference_mode():
                 generated_ids = self.model.generate(
