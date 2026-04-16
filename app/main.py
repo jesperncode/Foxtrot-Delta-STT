@@ -160,6 +160,8 @@ class HFWhisperWrapper:
             actual_dtype = next(self.model.parameters()).dtype
             input_features = inputs["input_features"].to(device=actual_device, dtype=actual_dtype)
 
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             with torch.inference_mode():
                 generated_ids = self.model.generate(
                     input_features=input_features,
