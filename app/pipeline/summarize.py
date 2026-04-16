@@ -21,8 +21,8 @@ MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:32b-instruct-q6_K")
 
 # Default timeouts (seconds)
 # HEAVY brukes til kall med mer innhold, f.eks. final-pass og komprimering
-OLLAMA_TIMEOUT_S = int(os.getenv("OLLAMA_TIMEOUT_S", "600"))         # Per-chunk notes (32b kan bruke tid)
-OLLAMA_TIMEOUT_S_HEAVY = int(os.getenv("OLLAMA_TIMEOUT_S_HEAVY", "1200"))  # Finalgenerering og komprimering
+OLLAMA_TIMEOUT_S = int(os.getenv("OLLAMA_TIMEOUT_S", "1200"))        # Per-chunk notes (32b kan bruke tid)
+OLLAMA_TIMEOUT_S_HEAVY = int(os.getenv("OLLAMA_TIMEOUT_S_HEAVY", "2400"))  # Finalgenerering og komprimering
 
 # Context window — qwen2.5:7b støtter 32K, llama3:8b maks 8K
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
